@@ -44,6 +44,24 @@ gcloud run services update gemini-vision-pro --region asia-east1 --project payfi
   --update-env-vars GEMINI_API_KEY="$GEMINI_KEY"
 ```
 
+## 通行碼（只給特定學生使用）
+
+設定 `ACCESS_CODES` 後，打開網址會先要求輸入通行碼，輸入正確才能使用 AI 功能。登入狀態保留 30 天。
+
+在 Cloud Shell 執行（會一併更新程式）：
+
+```bash
+cd ~/Gemini-Vision-Pro- && git pull
+read -p "輸入通行碼（多組用英文逗號分隔，例如 7A-star,7B-moon）：" CODES
+gcloud run deploy gemini-vision-pro --source . --project payfirebase --region asia-east1 --quiet \
+  --update-env-vars "^@^ACCESS_CODES=$CODES"
+```
+
+- **每班一組**：例如 `7A-star,7B-moon`，之後要停用某一班，只要把那組刪掉再執行一次。
+- **更換通行碼**：重新執行上面的指令即可；所有人的登入狀態會失效，要用新通行碼重新進入。
+- **取消通行碼**：`gcloud run services update gemini-vision-pro --region asia-east1 --project payfirebase --remove-env-vars ACCESS_CODES`
+- 同一個 IP 輸錯 10 次會鎖 10 分鐘，防止被猜中。
+
 ## 本機測試
 
 ```bash
@@ -59,6 +77,8 @@ npm run dev                  # http://localhost:8080
 | `GEMINI_API_KEY` | （必填） | Gemini API 金鑰 |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | 圖片解析與文字模型 |
 | `GEMINI_TTS_MODEL` | `gemini-3.8-flash-lite-tts` | 語音模型 |
+| `ACCESS_CODES` | （空白＝不需要） | 通行碼，多組用逗號分隔 |
+| `SESSION_DAYS` | `30` | 輸入通行碼後保持登入的天數 |
 | `RATE_LIMIT_PER_MIN` | `30` | 每個 IP 每分鐘可呼叫次數，避免網址被濫用 |
 
 > ⚠️ 這個儲存庫是公開的，請勿把金鑰寫進任何檔案。

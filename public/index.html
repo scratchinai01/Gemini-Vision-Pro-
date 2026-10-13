@@ -288,9 +288,27 @@
         .progress-bar-fill { width: 0%; height: 100%; background: linear-gradient(90deg, var(--gemini-blue), var(--gemini-purple)); transition: width 0.3s ease; box-shadow: 0 0 10px rgba(138,180,248,0.5); }
         #console-logs { font-size: 0.85rem; color: #81c995; height: 120px; overflow-y: auto; margin-bottom: 15px; display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; }
 
+        #gate { position: fixed; inset: 0; z-index: 10000; background: radial-gradient(circle at 50% 0%, #1a1c23 0%, #0f1011 60%); display: none; align-items: center; justify-content: center; padding: 20px; }
+        #gate.show { display: flex; }
+        .gate-card { width: 100%; max-width: 380px; background: rgba(30,31,32,0.85); border: 1px solid rgba(255,255,255,0.08); border-radius: 24px; padding: 32px 28px; text-align: center; box-shadow: 0 30px 100px rgba(0,0,0,0.8); }
+        .gate-input { box-sizing: border-box; display: block; width: 100%; padding: 14px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; color: #fff; font-size: 1.1rem; text-align: center; letter-spacing: 2px; }
+        .gate-input:focus { outline: none; border-color: var(--gemini-blue); }
+        .gate-err { color: var(--error-red); font-size: 0.9rem; min-height: 1.4em; margin-top: 10px; }
+
     </style>
 </head>
 <body>
+
+    <div id="gate">
+        <form class="gate-card" onsubmit="submitGate(event)">
+            <div style="font-size:2.5rem;line-height:1" class="mb-3">🔐</div>
+            <h2 class="text-xl font-bold text-white mb-1">請輸入通行碼</h2>
+            <p class="text-sm text-gray-400 mb-5">通行碼請向老師索取</p>
+            <input id="gate-code" class="gate-input" type="password" autocomplete="off" placeholder="通行碼" required>
+            <div id="gate-err" class="gate-err"></div>
+            <button id="gate-btn" class="btn-action mt-2" type="submit">進入</button>
+        </form>
+    </div>
 
     <div id="toast-container"></div>
     <div id="lightbox" onclick="closeLightbox()"><img id="lightbox-img" src="" alt="Enlarged View"></div>
@@ -461,6 +479,7 @@
                     if (!res.ok) {
                         const body = await res.json().catch(() => ({}));
                         const err = new Error(body.error || `HTTP ${res.status}`);
+                        if (body.needCode) showGate('登入已過期，請重新輸入通行碼');
                         err.retryable = res.status === 429 || res.status >= 500;
                         throw err;
                     }
@@ -1166,6 +1185,38 @@
             showToast("講稿已匯出", "success");
         }
 
+    </script>
+    <script>
+        // ---- 通行碼 ----
+        async function checkGate() {
+            try {
+                const r = await fetch('/api/auth');
+                const d = await r.json();
+                if (d.required && !d.ok) showGate();
+            } catch (e) { /* 離線時略過 */ }
+        }
+        function showGate(msg) {
+            document.getElementById('gate').classList.add('show');
+            document.getElementById('gate-err').textContent = msg || '';
+            setTimeout(() => document.getElementById('gate-code').focus(), 50);
+        }
+        async function submitGate(e) {
+            e.preventDefault();
+            const btn = document.getElementById('gate-btn');
+            const code = document.getElementById('gate-code').value;
+            btn.disabled = true;
+            try {
+                const r = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+                const d = await r.json().catch(() => ({}));
+                if (!r.ok) throw new Error(d.error || '通行碼錯誤');
+                document.getElementById('gate').classList.remove('show');
+                document.getElementById('gate-code').value = '';
+                showToast('歡迎使用！', 'success');
+            } catch (err) {
+                document.getElementById('gate-err').textContent = err.message;
+            } finally { btn.disabled = false; }
+        }
+        checkGate();
     </script>
 </body>
 </html>

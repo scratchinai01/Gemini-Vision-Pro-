@@ -3,6 +3,7 @@
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
+import crypto from "crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const API_KEY = (process.env.GEMINI_API_KEY || "").trim();
@@ -11,6 +12,47 @@ const MODELS = {
   tts: process.env.GEMINI_TTS_MODEL || "gemini-3.8-flash-lite-tts",
 };
 const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN) || 30;
+
+// 通行碼：多組請用逗號分隔，例如 ACCESS_CODES=7A-star,7B-moon。留空代表不需要通行碼。
+const ACCESS_CODES = (process.env.ACCESS_CODES || "").split(",").map((c) => c.trim()).filter(Boolean);
+const SESSION_DAYS = Number(process.env.SESSION_DAYS) || 30;
+const COOKIE = "gvp_pass";
+// 更換通行碼時，舊的登入狀態會自動失效
+const SECRET = crypto
+  .createHash("sha256")
+  .update((process.env.SESSION_SECRET || API_KEY || "gvp") + "|" + ACCESS_CODES.join(","))
+  .digest();
+
+function sign(value) {
+  return crypto.createHmac("sha256", SECRET).update(value).digest("base64url");
+}
+function makeToken(code) {
+  const exp = Date.now() + SESSION_DAYS * 86400_000;
+  const idx = ACCESS_CODES.indexOf(code);
+  const payload = `${exp}.${idx}`;
+  return `${payload}.${sign(payload)}`;
+}
+function readCookie(req, name) {
+  const m = (req.headers.cookie || "").match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return m ? decodeURIComponent(m[1]) : "";
+}
+function isAuthed(req) {
+  if (ACCESS_CODES.length === 0) return true;
+  const [exp, idx, sig] = readCookie(req, COOKIE).split(".");
+  if (!exp || !sig) return false;
+  const expected = sign(`${exp}.${idx}`);
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return false;
+  return Number(exp) > Date.now();
+}
+function requireAuth(req, res, next) {
+  if (isAuthed(req)) return next();
+  res.status(401).json({ error: "請先輸入通行碼。", needCode: true });
+}
+function safeEqual(a, b) {
+  const ha = crypto.createHash("sha256").update(a).digest();
+  const hb = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
 
 if (!API_KEY) console.warn("⚠️ 尚未設定 GEMINI_API_KEY 環境變數，AI 功能將無法使用。");
 
@@ -32,7 +74,30 @@ function rateLimit(req, res, next) {
 
 app.get("/healthz", (_req, res) => res.send("ok"));
 
-app.post("/api/gemini/:kind", rateLimit, async (req, res) => {
+// 通行碼登入
+const loginTries = new Map();
+setInterval(() => loginTries.clear(), 10 * 60_000).unref();
+app.get("/api/auth", (req, res) => res.json({ required: ACCESS_CODES.length > 0, ok: isAuthed(req) }));
+app.post("/api/auth", (req, res) => {
+  if (ACCESS_CODES.length === 0) return res.json({ ok: true });
+  const ip = req.ip || "unknown";
+  const tries = (loginTries.get(ip) || 0) + 1;
+  loginTries.set(ip, tries);
+  if (tries > 10) return res.status(429).json({ error: "嘗試次數太多，請 10 分鐘後再試。" });
+  const code = String(req.body?.code || "").trim();
+  const match = ACCESS_CODES.find((c) => safeEqual(c, code));
+  if (!match) return res.status(401).json({ error: "通行碼錯誤，請再確認一次。" });
+  loginTries.delete(ip);
+  res.cookie(COOKIE, makeToken(match), {
+    httpOnly: true,
+    secure: req.secure,
+    sameSite: "lax",
+    maxAge: SESSION_DAYS * 86400_000,
+  });
+  res.json({ ok: true });
+});
+
+app.post("/api/gemini/:kind", requireAuth, rateLimit, async (req, res) => {
   const model = MODELS[req.params.kind];
   if (!model) return res.status(404).json({ error: "未知的 API" });
   if (!API_KEY) return res.status(500).json({ error: "伺服器尚未設定 GEMINI_API_KEY。" });
