@@ -1,0 +1,1167 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini Vision Pro - 智慧區塊點選與重繪優化</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;500;700&family=JetBrains+Mono&display=swap');
+
+        :root {
+            --gemini-blue: #8ab4f8;
+            --gemini-purple: #c58af9;
+            --bg-dark: #0f1011;
+            --error-red: #f28b82;
+            --success-green: #81c995;
+        }
+
+        body {
+            font-family: 'Noto Sans TC', sans-serif;
+            background: radial-gradient(circle at 50% 0%, #1a1c23 0%, var(--bg-dark) 60%);
+            color: #e3e3e3;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px 20px;
+            margin: 0;
+            overflow-x: hidden;
+        }
+
+        #toast-container {
+            position: fixed;
+            top: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 2000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            pointer-events: none;
+        }
+        .toast {
+            background: rgba(40, 42, 45, 0.95);
+            backdrop-filter: blur(10px);
+            color: white;
+            padding: 12px 24px;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+            font-size: 0.95rem;
+            opacity: 0;
+            transform: translateY(-20px);
+            transition: all 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .toast.show { opacity: 1; transform: translateY(0); }
+        .toast.error { border-left: 4px solid var(--error-red); }
+        .toast.success { border-left: 4px solid var(--success-green); }
+
+        .main-card {
+            background: rgba(30, 31, 32, 0.7);
+            backdrop-filter: blur(24px);
+            width: 100%;
+            max-width: 900px;
+            border-radius: 24px;
+            padding: 40px 30px;
+            box-shadow: 0 30px 100px rgba(0,0,0,0.8);
+            position: relative;
+            z-index: 10;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            text-align: center;
+        }
+
+        .viewport {
+            width: 100%;
+            min-height: 400px; 
+            margin: 0 auto 30px;
+            border-radius: 16px;
+            position: relative;
+            background: rgba(19, 20, 22, 0.6); 
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border: 2px dashed rgba(138, 180, 248, 0.3); 
+            transition: all 0.4s ease;
+            padding: 20px;
+            overflow: hidden;
+        }
+        .viewport:hover {
+            border-color: rgba(138, 180, 248, 0.8);
+            background: rgba(138, 180, 248, 0.05);
+        }
+        .viewport.generating { animation: breathe 2s ease-in-out infinite; border-style: solid; }
+        @keyframes breathe {
+            0%, 100% { border-color: rgba(138, 180, 248, 0.2); box-shadow: 0 0 0px rgba(138, 180, 248, 0); }
+            50% { border-color: rgba(138, 180, 248, 0.8); box-shadow: 0 0 40px rgba(138, 180, 248, 0.3); }
+        }
+
+        .empty-state-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 16px;
+            color: var(--gemini-blue);
+            opacity: 0.7;
+            transition: opacity 0.3s, transform 0.3s;
+            pointer-events: none; 
+        }
+        .viewport:hover .empty-state-content {
+            opacity: 1;
+            transform: translateY(-4px);
+        }
+        .empty-state-icon {
+            width: 72px;
+            height: 72px;
+            opacity: 0.8;
+            filter: drop-shadow(0 0 20px rgba(138, 180, 248, 0.4));
+        }
+        .empty-state-text {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: #e3e3e3;
+            letter-spacing: 0.5px;
+        }
+        .empty-state-subtext {
+            font-size: 0.95rem;
+            color: #9aa0a6;
+        }
+
+        #image-wrapper {
+            position: relative;
+            display: inline-block;
+            max-width: 100%;
+            cursor: zoom-in; 
+            user-select: none;
+            width: 100%; 
+        }
+        #image-wrapper.redraw-mode {
+            cursor: crosshair !important;
+        }
+        
+        #stage-img {
+            display: none; 
+            max-width: 100%;
+            max-height: 550px;
+            border-radius: 8px;
+            transition: opacity 0.5s ease;
+            pointer-events: none; 
+            margin: 0 auto; 
+            box-shadow: 0 10px 40px rgba(0,0,0,0.6); 
+        }
+        #stage-img.loaded {
+            display: block; 
+        }
+
+        #bbox-container {
+            position: absolute;
+            inset: 0;
+            pointer-events: auto;
+        }
+        .bbox {
+            position: absolute;
+            border: 2px solid rgba(138, 180, 248, 0.6);
+            background: rgba(138, 180, 248, 0.15);
+            cursor: pointer;
+            border-radius: 4px;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: flex-start;
+            justify-content: flex-start;
+            pointer-events: auto;
+        }
+        .bbox:hover {
+            border-color: #fff;
+            background: rgba(255, 255, 255, 0.2);
+            box-shadow: 0 0 15px rgba(255,255,255,0.3);
+            z-index: 20;
+        }
+        .bbox.active {
+            border-color: var(--gemini-purple);
+            background: rgba(197, 138, 249, 0.3);
+            box-shadow: 0 0 20px rgba(197, 138, 249, 0.5);
+            z-index: 30;
+        }
+        .bbox-label {
+            background: rgba(0,0,0,0.85);
+            color: white;
+            font-size: 0.8rem;
+            padding: 4px 10px;
+            border-bottom-right-radius: 6px;
+            backdrop-filter: blur(4px);
+            font-weight: 500;
+        }
+
+        .info-panel {
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 24px;
+            border: 1px solid rgba(138, 180, 248, 0.15);
+            text-align: left;
+            min-height: 120px;
+            box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
+        }
+        .typewriter-box {
+            font-family: 'JetBrains Mono', 'Noto Sans TC', monospace;
+            font-size: 1.1rem;
+            line-height: 1.8;
+            color: #c4c7c5;
+            margin-bottom: 15px;
+        }
+        .cursor {
+            display: inline-block;
+            width: 8px;
+            height: 1rem;
+            background: var(--gemini-blue);
+            margin-left: 4px;
+            animation: blink 1s step-end infinite;
+        }
+        @keyframes blink { 50% { opacity: 0; } }
+
+        .action-row {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 15px;
+        }
+        .btn-sm {
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            justify-content: center;
+        }
+        .btn-sm-primary { background: rgba(138, 180, 248, 0.15); color: var(--gemini-blue); border: 1px solid rgba(138, 180, 248, 0.3); }
+        .btn-sm-primary:hover { background: rgba(138, 180, 248, 0.25); transform: translateY(-1px); }
+        .btn-sm-warning { background: rgba(251, 188, 4, 0.15); color: #fbbc04; border: 1px solid rgba(251, 188, 4, 0.3); }
+        .btn-sm-warning:hover { background: rgba(251, 188, 4, 0.25); transform: translateY(-1px); }
+
+        .input-group { background: rgba(0, 0, 0, 0.3); border-radius: 16px; padding: 20px; margin-bottom: 20px; border: 1px solid rgba(255, 255, 255, 0.05); text-align: left; }
+        .custom-file-upload { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 14px; cursor: pointer; background: rgba(138, 180, 248, 0.05); color: var(--gemini-blue); border-radius: 12px; border: 1px dashed rgba(138, 180, 248, 0.4); transition: 0.3s; font-weight: 500; }
+        .custom-file-upload:hover { background: rgba(138, 180, 248, 0.1); border-color: var(--gemini-blue); }
+        input[type="file"] { display: none; }
+        
+        .suggestion-container { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; min-height: 32px; }
+        .suggestion-pill { background: rgba(138, 180, 248, 0.1); border: 1px solid rgba(138, 180, 248, 0.3); color: var(--gemini-blue); padding: 6px 14px; border-radius: 100px; font-size: 0.85rem; cursor: pointer; transition: 0.3s; }
+        .suggestion-pill:hover { background: var(--gemini-blue); color: #062e6f; }
+        .theme-input { width: 100%; padding: 14px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; color: white; margin-top: 15px; transition: 0.3s; font-size: 1rem; }
+        .theme-input:focus { outline: none; border-color: var(--gemini-blue); background: rgba(255, 255, 255, 0.08); box-shadow: 0 0 15px rgba(138, 180, 248, 0.1); }
+        
+        .btn-action { background: linear-gradient(135deg, var(--gemini-blue), #5e92f3); color: #062e6f; font-weight: 700; padding: 16px; border-radius: 100px; cursor: pointer; width: 100%; border: none; box-shadow: 0 10px 20px rgba(138, 180, 248, 0.2); transition: 0.3s; font-size: 1.1rem; }
+        .btn-action:hover { transform: translateY(-2px); box-shadow: 0 15px 30px rgba(138, 180, 248, 0.3); }
+        .btn-action:disabled { background: #3c4043; color: #80868b; box-shadow: none; cursor: not-allowed; transform: none; }
+
+        .wave-container { display: flex; justify-content: center; gap: 4px; height: 20px; opacity: 0; transition: opacity 0.3s; }
+        .wave-container.active { opacity: 1; }
+        .wave-bar { width: 3px; height: 10px; background: var(--gemini-purple); border-radius: 3px; animation: wave 1.2s infinite; }
+        @keyframes wave { 0%, 100% { height: 5px; } 50% { height: 20px; } }
+
+        #lightbox { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0, 0, 0, 0.95); z-index: 9999; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.3s ease; backdrop-filter: blur(5px); }
+        #lightbox.show { opacity: 1; pointer-events: auto; cursor: zoom-out; }
+        #lightbox img { max-width: 95vw; max-height: 95vh; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,0.8); object-fit: contain; transform: scale(0.95); transition: transform 0.3s cubic-bezier(0.23, 1, 0.32, 1); }
+        #lightbox.show img { transform: scale(1); }
+
+        #edit-panel { background: rgba(0, 0, 0, 0.4); border-top: 1px solid rgba(255, 255, 255, 0.1); margin-top: 20px; padding-top: 20px; display: none; animation: fadeIn 0.3s ease; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+
+        #export-console {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 4000;
+            display: none; flex-direction: column; align-items: center; justify-content: center;
+            font-family: 'JetBrains Mono', monospace; padding: 20px; backdrop-filter: blur(10px);
+        }
+        .console-window {
+            width: 100%; max-width: 600px; background: #0a0a0a; border: 1px solid #333;
+            border-radius: 16px; padding: 24px; box-shadow: 0 0 50px rgba(138, 180, 248, 0.15);
+        }
+        .progress-bar-bg { width: 100%; height: 8px; background: #222; margin: 20px 0; border-radius: 4px; overflow: hidden; }
+        .progress-bar-fill { width: 0%; height: 100%; background: linear-gradient(90deg, var(--gemini-blue), var(--gemini-purple)); transition: width 0.3s ease; box-shadow: 0 0 10px rgba(138,180,248,0.5); }
+        #console-logs { font-size: 0.85rem; color: #81c995; height: 120px; overflow-y: auto; margin-bottom: 15px; display: flex; flex-direction: column; justify-content: flex-end; gap: 6px; }
+
+    </style>
+</head>
+<body>
+
+    <div id="toast-container"></div>
+    <div id="lightbox" onclick="closeLightbox()"><img id="lightbox-img" src="" alt="Enlarged View"></div>
+
+    <div id="export-console">
+        <div class="console-window">
+            <div class="flex justify-between items-center mb-4 border-b border-white/10 pb-3">
+                <span class="text-blue-400 text-sm font-bold">🎬 VIDEO EXPORT CONSOLE</span>
+            </div>
+            <div id="console-logs"><p>> Initializing rendering engine...</p></div>
+            <div class="text-white text-lg mb-2 font-bold flex justify-between">
+                <span>正在合成導覽影音...</span>
+                <span id="progress-text" class="text-purple-400">0%</span>
+            </div>
+            <div class="progress-bar-bg"><div id="progress-bar" class="progress-bar-fill"></div></div>
+        </div>
+    </div>
+
+    <div class="text-center mb-8 z-10 relative">
+        <h1 class="text-4xl font-bold mb-3 flex items-center justify-center gap-3 tracking-wide">
+            <span class="bg-clip-text text-transparent bg-gradient-to-r from-blue-400 via-indigo-400 to-purple-400">
+                Gemini Vision Pro
+            </span>
+        </h1>
+        <p class="text-gray-400 text-lg">沉浸式知識策展與導覽生成系統</p>
+    </div>
+
+    <div class="main-card">
+        
+        <!-- 圖像檢視區與優化的 Empty State -->
+        <label for="image-upload" class="viewport cursor-pointer group" id="viewport">
+            <div id="empty-state" class="empty-state-content">
+                <svg class="empty-state-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.752 3.752 0 0118 19.5H6.75z" />
+                </svg>
+                <div class="text-center">
+                    <p class="empty-state-text">喚醒你的百萬說書人</p>
+                    <p class="empty-state-subtext mt-2">將任何視覺素材拖曳至此，為冷冰冰的資訊賦予史詩級靈魂</p>
+                </div>
+            </div>
+            
+            <div id="image-wrapper" class="hidden" onclick="openLightbox(event)">
+                <img id="stage-img" src="" alt="Stage Image" draggable="false">
+                <div id="bbox-container"></div>
+            </div>
+
+            <div id="loader" class="absolute inset-0 flex items-center justify-center hidden bg-black/60 rounded-xl backdrop-blur-sm z-50">
+                <div class="w-12 h-12 border-4 border-blue-400/20 border-t-blue-400 rounded-full animate-spin"></div>
+            </div>
+        </label>
+
+        <!-- 資訊與控制面板 -->
+        <div class="info-panel">
+            <div class="flex justify-between items-start mb-3">
+                <div class="text-sm font-bold text-blue-400" id="block-title">系統提示</div>
+                <div class="wave-container" id="wave-ui">
+                    <div class="wave-bar" style="animation-delay: 0.1s"></div>
+                    <div class="wave-bar" style="animation-delay: 0.3s"></div>
+                    <div class="wave-bar" style="animation-delay: 0.0s"></div>
+                    <div class="wave-bar" style="animation-delay: 0.4s"></div>
+                </div>
+            </div>
+            
+            <div class="typewriter-box" id="type-target">
+                等待視覺素材匯入中。Gemini 將化身為您的專屬說書人，為您策展一場引人入勝的知識饗宴...
+            </div>
+
+            <!-- 單區塊操作列 -->
+            <div id="block-actions" class="action-row hidden border-t border-white/10 pt-4 mt-3">
+                <button class="btn-sm btn-sm-primary" onclick="previewCurrentScene()" title="預覽此幕效果(圖文音)">
+                    ▶️ 逐頁實境預覽
+                </button>
+                <button id="redraw-btn" class="btn-sm btn-sm-warning ml-auto" onclick="enableRedrawMode()" title="自己動手畫出完美的框線">
+                    📐 手動重新框選
+                </button>
+                <button class="btn-sm btn-sm-primary" onclick="toggleEditPanel()" title="手動修改圖文音">
+                    ⚙️ 客製化解說
+                </button>
+            </div>
+
+            <!-- 區塊手動編輯面板 -->
+            <div id="edit-panel">
+                <div class="mb-3">
+                    <label class="text-xs text-gray-400 block mb-2 flex justify-between items-center">
+                        <span>修改導覽台詞：</span>
+                        <button class="text-purple-400 hover:text-purple-300 transition-colors flex items-center gap-1 bg-purple-900/30 px-2 py-1 rounded border border-purple-500/30" onclick="regenerateBlockSpeech()" id="regen-speech-btn" title="呼叫 AI 用說書人語氣重新撰寫這段">
+                            ✨ AI 重新演繹
+                        </button>
+                    </label>
+                    <textarea id="edit-speech-input" class="w-full bg-[#0f1011] text-white p-3 rounded-lg h-24 text-sm border border-gray-600 focus:border-blue-400 focus:outline-none" placeholder="輸入新的解說..."></textarea>
+                </div>
+                <div class="flex gap-3 mb-3">
+                    <label class="custom-file-upload flex-1 !p-2 !text-sm">
+                        <input type="file" accept="image/*" onchange="handleCustomImage(this)">
+                        <span id="custom-img-label">🖼️ 上傳自訂圖片</span>
+                    </label>
+                    <label class="custom-file-upload flex-1 !p-2 !text-sm">
+                        <input type="file" accept="audio/*" onchange="handleCustomAudio(this)">
+                        <span id="custom-audio-label">🎵 上傳真人語音</span>
+                    </label>
+                </div>
+                <div class="flex gap-2">
+                    <button class="btn-sm btn-sm-primary w-full" onclick="saveBlockEdits()">💾 儲存修改</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 輸入與設定區 -->
+        <div id="input-section" class="input-group">
+            <label class="custom-file-upload hidden">
+                <input type="file" id="image-upload" accept="image/*" onchange="handleImageUpload(this)"/>
+                <span id="file-name">📷 上傳素材</span>
+            </label>
+            <div class="flex items-center gap-2 mb-2">
+                <span class="text-sm font-bold text-gray-300">🎯 賦予故事主題</span>
+            </div>
+            <div id="suggestion-container" class="suggestion-container"></div>
+            <input type="text" id="theme-input" class="theme-input" placeholder="等待建議或手動輸入主題 (例如：歷史的塵埃、未來的藍圖)...">
+        </div>
+
+        <!-- 主要動作按鈕 -->
+        <div id="main-actions" class="flex flex-col gap-3">
+            <button id="main-btn" class="btn-action" onclick="analyzeCatalog()">開始史詩級解析</button>
+            
+            <div id="export-group" class="hidden flex flex-col sm:flex-row gap-3 mt-2 border-t border-white/10 pt-4">
+                <button class="btn-action !text-sm !py-3" style="background: rgba(138, 180, 248, 0.15); color: #8ab4f8; border: 1px solid rgba(138,180,248,0.3); box-shadow: none;" onclick="downloadFullVideo()">
+                    📥 匯出電影級導覽影音 (.webm)
+                </button>
+                <button class="btn-action !text-sm !py-3" style="background: rgba(255, 255, 255, 0.1); color: #e3e3e3; border: 1px solid rgba(255,255,255,0.2); box-shadow: none;" onclick="downloadArticle()">
+                    📝 匯出社群講稿 (.txt)
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <audio id="audio-player" class="hidden"></audio>
+    <canvas id="export-canvas" class="hidden"></canvas>
+
+    <script>
+        // 金鑰由伺服器（server.js）保管，網頁不含任何金鑰
+        const API_TEXT = "/api/gemini/text";
+        const API_TTS = "/api/gemini/tts";
+        
+        let originalImageGlobal = null;
+        let originalImgEl = null; // 已解碼的原圖，用於裁切
+        let originalWidth = 0;
+        let originalHeight = 0;
+        let segments = [];
+        let activeBlockIndex = -1; 
+        let isRedrawMode = false;
+        let globalIntroSpeech = ""; 
+
+        const stageImg = document.getElementById('stage-img');
+        const imgWrapper = document.getElementById('image-wrapper');
+        const bboxContainer = document.getElementById('bbox-container');
+        const themeInput = document.getElementById('theme-input');
+        const suggestionContainer = document.getElementById('suggestion-container');
+        const mainBtn = document.getElementById('main-btn');
+        const viewport = document.getElementById('viewport');
+        const blockActions = document.getElementById('block-actions');
+        const editPanel = document.getElementById('edit-panel');
+
+        async function fetchWithRetry(url, options, maxRetries = 5) {
+            const delays = [1000, 2000, 4000, 8000, 16000];
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const res = await fetch(url, options);
+                    if (!res.ok) {
+                        const body = await res.json().catch(() => ({}));
+                        const err = new Error(body.error || `HTTP ${res.status}`);
+                        err.retryable = res.status === 429 || res.status >= 500;
+                        throw err;
+                    }
+                    return await res.json();
+                } catch (e) {
+                    if (e.retryable === false || i === maxRetries - 1) throw e;
+                    await new Promise(r => setTimeout(r, delays[i]));
+                }
+            }
+        }
+
+        let typeInterrupt = false;
+        async function typeText(text) {
+            typeInterrupt = true; 
+            await new Promise(r => setTimeout(r, 50)); 
+            typeInterrupt = false;
+
+            const target = document.getElementById('type-target');
+            target.innerHTML = '<span id="typing"></span><span class="cursor"></span>';
+            const span = document.getElementById('typing');
+            
+            for (let i = 0; i < text.length; i++) {
+                if(typeInterrupt) break;
+                span.textContent += text.charAt(i);
+                await new Promise(r => setTimeout(r, 15)); 
+            }
+        }
+
+        function showToast(msg, type = 'error') {
+            const container = document.getElementById('toast-container');
+            const t = document.createElement('div');
+            t.className = `toast ${type}`;
+            t.innerHTML = `<span>${type === 'error' ? '⚠️' : '✅'}</span><span>${msg}</span>`;
+            container.appendChild(t);
+            void t.offsetWidth; t.classList.add('show');
+            setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 400); }, 3000);
+        }
+
+        async function handleImageUpload(input) {
+            if (!input.files[0]) return;
+            const file = input.files[0];
+            document.getElementById('file-name').textContent = file.name;
+            
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                originalImageGlobal = e.target.result;
+                const img = new Image();
+                img.onload = () => { 
+                    originalImgEl = img;
+                    originalWidth = img.width; 
+                    originalHeight = img.height; 
+                    
+                    document.getElementById('empty-state').classList.add('hidden');
+                    imgWrapper.classList.remove('hidden');
+                    viewport.style.borderStyle = 'solid'; 
+                    viewport.style.background = 'transparent';
+                    
+                    stageImg.src = originalImageGlobal; 
+                    stageImg.classList.add('loaded'); 
+                    
+                    bboxContainer.innerHTML = '';
+                    segments = [];
+                    activeBlockIndex = -1;
+                    isRedrawMode = false;
+                    imgWrapper.classList.remove('redraw-mode');
+                    blockActions.classList.add('hidden');
+                    editPanel.style.display = 'none';
+                    document.getElementById('export-group').classList.add('hidden');
+                    mainBtn.classList.remove('hidden');
+                };
+                img.src = originalImageGlobal;
+                
+                const base64Data = e.target.result.split(',')[1];
+                document.getElementById('block-title').textContent = "系統提示";
+                await typeText("> 圖片已讀取。正在為您構思充滿懸念的故事主題...");
+                generateThemeSuggestions({ mimeType: file.type, data: base64Data });
+            };
+            reader.readAsDataURL(file);
+        }
+
+        async function generateThemeSuggestions(imageInfo) {
+            suggestionContainer.innerHTML = '<div class="text-xs text-blue-400 animate-pulse">正在推論最佳導覽主題...</div>';
+            const payload = {
+                contents: [{
+                    role: "user",
+                    parts: [
+                        { text: "請觀察這張圖片，回傳一個包含 'themes' 陣列的 JSON 物件，提供 3 個最適合這張圖片、且具有懸念或史詩感的主題名稱。請使用繁體中文。" },
+                        { inlineData: { mimeType: imageInfo.mimeType, data: imageInfo.data } }
+                    ]
+                }],
+                generationConfig: { responseMimeType: "application/json", responseSchema: { type: "OBJECT", properties: { themes: { type: "ARRAY", items: { type: "STRING" } } } } }
+            };
+            try {
+                const data = await fetchWithRetry(API_TEXT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const result = JSON.parse(data.candidates[0].content.parts[0].text);
+                suggestionContainer.innerHTML = '';
+                result.themes.forEach(theme => {
+                    const pill = document.createElement('div');
+                    pill.className = 'suggestion-pill';
+                    pill.textContent = theme;
+                    pill.onclick = (e) => { e.stopPropagation(); themeInput.value = theme; showToast(`已套用：${theme}`, 'success'); };
+                    suggestionContainer.appendChild(pill);
+                });
+            } catch (e) { suggestionContainer.innerHTML = ''; showToast("主題推論失敗，請手動輸入"); }
+        }
+
+        async function analyzeCatalog() {
+            const fileInput = document.getElementById('image-upload');
+            const theme = themeInput.value.trim();
+            if (!originalImageGlobal || !theme) { showToast("請上傳圖片並確認導覽主題"); return; }
+            
+            mainBtn.disabled = true;
+            document.getElementById('loader').classList.remove('hidden');
+            viewport.classList.add('generating');
+            document.getElementById('block-title').textContent = "史詩級解析中";
+            await typeText(`> 正在為「${theme}」構建 Netflix 級別的紀錄片旁白，請稍候...`);
+            
+            const base64 = originalImageGlobal.split(',')[1];
+            
+            // 史詩級升級的 System Prompt
+            const promptText = `你現在是一位「擁有百萬訂閱的爆款說書人」，同時兼具「Netflix 紀錄片旁白」那種充滿磁性、戲劇張力與神祕感的特質。你要為聽眾帶來一場極度沉浸的視覺饗宴。
+
+【最高指導原則】：
+1. 絕對禁止任何破壞沉浸感的字眼，如「左上方/右上方」、「圖中可以看到」、「你上傳了這張圖片」。聽眾只會聽到你的聲音，並不知道圖片的存在。
+2. 嚴禁老套開場！不准說「歡迎來到本次導覽」、「今天我們要介紹/探討...」、「讓我們來看看...」。
+3. 必須把死板的資訊包裝成「驚人的秘密」或「深刻的見解」，彷彿在跟老朋友分享一個天大的秘密，充滿情感波動。
+
+【任務指令】：
+1. 空間解析：將畫面邏輯切割成 3-6 個最具代表性的核心板塊。（座標格式 [ymin, xmin, ymax, xmax] 範圍 0-1000）。
+2. 沉浸式故事開場 (storyIntroSpeech)：根據這張圖片的視覺氛圍與主題【${theme}】，寫出一段極具磁性與懸念的開場。
+   ✅ 絕佳範例：「（深呼吸）...直到這一刻，我才真正明白這背後隱藏的秘密。你可能從未注意過...」
+3. 故事化區塊解說 (speech)：
+   - 在解說每個板塊時，【強制】使用強烈帶入感的情緒轉折語，例如：「但你可能沒想到...」、「真正令人窒息的是...」、「說實話，當我發現這個細節時...」、「直到這一刻...」。
+   - 拒絕呆板的規格或功能說明，將每一個區塊的資訊昇華為劇情轉折或是令人起雞皮疙瘩的洞察。`;
+
+            const payload = {
+                contents: [{
+                    role: "user",
+                    parts: [
+                        { text: promptText },
+                        { inlineData: { mimeType: fileInput.files[0].type, data: base64 } }
+                    ]
+                }],
+                generationConfig: { 
+                    responseMimeType: "application/json", 
+                    responseSchema: { 
+                        type: "OBJECT", 
+                        properties: { 
+                            storyIntroSpeech: { type: "STRING" }, 
+                            segments: { 
+                                type: "ARRAY", 
+                                items: { 
+                                    type: "OBJECT", 
+                                    properties: { 
+                                        title: { type: "STRING" }, 
+                                        bounding_box: { type: "ARRAY", items: { type: "INTEGER" } }, 
+                                        speech: { type: "STRING" } 
+                                    } 
+                                } 
+                            } 
+                        } 
+                    } 
+                }
+            };
+            
+            try {
+                const data = await fetchWithRetry(API_TEXT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const result = JSON.parse(data.candidates[0].content.parts[0].text);
+                
+                globalIntroSpeech = result.storyIntroSpeech || `（深呼吸）...直到這一刻，我才真正明白這背後隱藏的秘密。`;
+                segments = result.segments.map(seg => ({ ...seg, customImage: null, customAudio: null, audioBlob: null }));
+                renderBoundingBoxes();
+                
+                mainBtn.classList.add('hidden');
+                document.getElementById('export-group').classList.remove('hidden');
+                document.getElementById('block-title').textContent = "解析完成";
+                await typeText(`> 解析完成。已為您準備好 ${segments.length} 個充滿張力的故事章節。您可以在下方調整台詞，或使用「✨ AI 重新演繹」來獲得新的靈感。`);
+                showToast("網格分割成功", "success");
+            } catch (e) { 
+                showToast("解析失敗：" + e.message); 
+                mainBtn.disabled = false; 
+            } finally { 
+                document.getElementById('loader').classList.add('hidden'); 
+                viewport.classList.remove('generating'); 
+            }
+        }
+
+        // 新增：AI 單一區塊重新演繹功能
+        async function regenerateBlockSpeech() {
+            if (activeBlockIndex < 0) return;
+            const btn = document.getElementById('regen-speech-btn');
+            const input = document.getElementById('edit-speech-input');
+            const seg = segments[activeBlockIndex];
+            const theme = themeInput.value.trim();
+
+            btn.disabled = true;
+            btn.innerHTML = `<span class="animate-pulse">✨ 重新構思中...</span>`;
+            
+            try {
+                // 將該區塊的畫面裁切為 Base64 傳給 AI
+                const croppedDataURL = cropImageToDataURL(seg.bounding_box);
+                const base64Data = croppedDataURL.split(',')[1];
+
+                const prompt = `你現在是一位「擁有百萬訂閱的爆款說書人」兼「Netflix 紀錄片旁白」。請針對這個畫面的局部細節（所屬主題：${theme}），重新撰寫一段極具渲染力的解說台詞。
+                
+【嚴格要求】：
+1. 拒絕呆板的說明，要像在跟老朋友分享一個天大的秘密。
+2. 充滿磁性與戲劇張力，【強制】使用如「但你可能沒想到...」、「真正令人窒息的是...」、「直到這一刻...」、「說實話，當我發現這個細節時...」這類強烈帶入感的轉折語。
+3. 絕對不准提到「這張局部圖片」、「圖片中」、「可以看到」、「右上角」等字眼。
+4. 長度約 40-70 字，直接回傳台詞純文字，不要有任何其他標記。`;
+
+                const payload = {
+                    contents: [{
+                        role: "user",
+                        parts: [
+                            { text: prompt },
+                            { inlineData: { mimeType: 'image/jpeg', data: base64Data } }
+                        ]
+                    }]
+                };
+
+                const data = await fetchWithRetry(API_TEXT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const newText = data.candidates[0].content.parts[0].text.trim();
+                
+                input.value = newText;
+                showToast("✨ 重新演繹成功！請點擊「儲存修改」套用", "success");
+            } catch (e) {
+                showToast("重新演繹失敗，請重試", "error");
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = `✨ AI 重新演繹`;
+            }
+        }
+
+        function renderBoundingBoxes() {
+            bboxContainer.innerHTML = '';
+            segments.forEach((seg, index) => {
+                const [ymin, xmin, ymax, xmax] = seg.bounding_box;
+                const top = (ymin / 1000) * 100;
+                const left = (xmin / 1000) * 100;
+                const height = ((ymax - ymin) / 1000) * 100;
+                const width = ((xmax - xmin) / 1000) * 100;
+
+                const box = document.createElement('div');
+                box.className = 'bbox';
+                box.style.top = `${top}%`;
+                box.style.left = `${left}%`;
+                box.style.height = `${height}%`;
+                box.style.width = `${width}%`;
+                
+                const label = document.createElement('div');
+                label.className = 'bbox-label';
+                label.textContent = seg.title;
+                box.appendChild(label);
+
+                box.onclick = (e) => {
+                    e.stopPropagation(); 
+                    if(isRedrawMode) return;
+                    selectBlock(index);
+                };
+
+                bboxContainer.appendChild(box);
+            });
+        }
+
+        function selectBlock(index) {
+            if (isRedrawMode) return;
+            activeBlockIndex = index;
+            const seg = segments[index];
+            
+            document.querySelectorAll('.bbox').forEach((b, i) => b.classList.toggle('active', i === index));
+            
+            document.getElementById('block-title').textContent = `章節檢視：${seg.title}`;
+            typeText(seg.speech);
+            
+            document.getElementById('edit-speech-input').value = seg.speech;
+            document.getElementById('custom-img-label').textContent = seg.customImage ? '✅ 已套用新圖片' : '🖼️ 上傳自訂圖片';
+            document.getElementById('custom-audio-label').textContent = seg.customAudio ? '✅ 已套用新語音' : '🎵 上傳真人語音';
+            
+            blockActions.classList.remove('hidden');
+        }
+
+        function toggleEditPanel() {
+            const isHidden = editPanel.style.display === 'none' || editPanel.style.display === '';
+            editPanel.style.display = isHidden ? 'block' : 'none';
+        }
+
+        let redrawStartX = 0, redrawStartY = 0;
+        let tempDrawBox = null;
+
+        function enableRedrawMode() {
+            if (activeBlockIndex < 0) return;
+            isRedrawMode = true;
+            imgWrapper.classList.add('redraw-mode');
+            showToast("🖌️ 請直接在上方圖片「點擊並拖曳」畫出完美的範圍", "success");
+            
+            document.querySelectorAll('.bbox').forEach(b => b.style.pointerEvents = 'none'); 
+            document.getElementById('redraw-btn').textContent = "✏️ 繪製中...";
+            document.getElementById('redraw-btn').classList.add('animate-pulse');
+        }
+
+        imgWrapper.addEventListener('mousedown', (e) => {
+            if (!isRedrawMode) return;
+            const rect = stageImg.getBoundingClientRect();
+            redrawStartX = ((e.clientX - rect.left) / rect.width) * 100;
+            redrawStartY = ((e.clientY - rect.top) / rect.height) * 100;
+
+            if (!tempDrawBox) {
+                tempDrawBox = document.createElement('div');
+                tempDrawBox.style.cssText = "position:absolute; border:2px dashed #fbbc04; background:rgba(251,188,4,0.3); pointer-events:none; z-index: 100;";
+                imgWrapper.appendChild(tempDrawBox);
+            }
+            tempDrawBox.style.left = `${redrawStartX}%`;
+            tempDrawBox.style.top = `${redrawStartY}%`;
+            tempDrawBox.style.width = `0%`;
+            tempDrawBox.style.height = `0%`;
+            tempDrawBox.style.display = 'block';
+        });
+
+        imgWrapper.addEventListener('mousemove', (e) => {
+            if (!isRedrawMode || !tempDrawBox || tempDrawBox.style.display === 'none') return;
+            const rect = stageImg.getBoundingClientRect();
+            let currX = ((e.clientX - rect.left) / rect.width) * 100;
+            let currY = ((e.clientY - rect.top) / rect.height) * 100;
+
+            currX = Math.max(0, Math.min(100, currX));
+            currY = Math.max(0, Math.min(100, currY));
+
+            const left = Math.min(redrawStartX, currX);
+            const top = Math.min(redrawStartY, currY);
+            const width = Math.abs(currX - redrawStartX);
+            const height = Math.abs(currY - redrawStartY);
+
+            tempDrawBox.style.left = `${left}%`;
+            tempDrawBox.style.top = `${top}%`;
+            tempDrawBox.style.width = `${width}%`;
+            tempDrawBox.style.height = `${height}%`;
+        });
+
+        imgWrapper.addEventListener('mouseup', (e) => {
+            if (!isRedrawMode || !tempDrawBox || tempDrawBox.style.display === 'none') return;
+            isRedrawMode = false;
+            imgWrapper.classList.remove('redraw-mode');
+            tempDrawBox.style.display = 'none';
+            document.querySelectorAll('.bbox').forEach(b => b.style.pointerEvents = 'auto');
+            
+            const btn = document.getElementById('redraw-btn');
+            btn.textContent = "📐 手動重新框選";
+            btn.classList.remove('animate-pulse');
+
+            const rect = stageImg.getBoundingClientRect();
+            let endX = ((e.clientX - rect.left) / rect.width) * 100;
+            let endY = ((e.clientY - rect.top) / rect.height) * 100;
+            endX = Math.max(0, Math.min(100, endX));
+            endY = Math.max(0, Math.min(100, endY));
+
+            const xmin = Math.floor(Math.min(redrawStartX, endX) * 10);
+            const xmax = Math.floor(Math.max(redrawStartX, endX) * 10);
+            const ymin = Math.floor(Math.min(redrawStartY, endY) * 10);
+            const ymax = Math.floor(Math.max(redrawStartY, endY) * 10);
+
+            if (xmax - xmin < 20 || ymax - ymin < 20) {
+                showToast("框選範圍太小，已取消動作", "error");
+                return;
+            }
+
+            segments[activeBlockIndex].bounding_box = [ymin, xmin, ymax, xmax];
+            if (segments[activeBlockIndex].customImage) {
+                segments[activeBlockIndex].customImage = null; 
+                document.getElementById('custom-img-label').textContent = '🖼️ 上傳自訂圖片';
+            }
+
+            renderBoundingBoxes();
+            selectBlock(activeBlockIndex); 
+            showToast("畫面範圍已完美更新！", "success");
+        });
+
+        function openLightbox(event) {
+            if (isRedrawMode) return; 
+            if (event) {
+                event.preventDefault();
+                event.stopPropagation();
+            }
+
+            const src = stageImg.src;
+            if (src && src.includes('data:image')) {
+                document.getElementById('lightbox-img').src = src;
+                document.getElementById('lightbox').classList.add('show');
+            }
+        }
+        function closeLightbox() { document.getElementById('lightbox').classList.remove('show'); }
+
+        function saveBlockEdits() {
+            if (activeBlockIndex < 0) return;
+            const newText = document.getElementById('edit-speech-input').value.trim();
+            const seg = segments[activeBlockIndex];
+            
+            if (newText !== seg.speech) {
+                seg.speech = newText;
+                seg.audioBlob = null; 
+            }
+            
+            toggleEditPanel();
+            typeText(newText);
+            showToast("變更已儲存！", "success");
+        }
+
+        function handleCustomImage(input) {
+            if (activeBlockIndex < 0 || !input.files[0]) return;
+            const reader = new FileReader();
+            reader.onload = e => {
+                segments[activeBlockIndex].customImage = e.target.result;
+                document.getElementById('custom-img-label').textContent = '✅ 已套用新圖片';
+                showToast("自訂圖片已加載", "success");
+            };
+            reader.readAsDataURL(input.files[0]);
+        }
+
+        function handleCustomAudio(input) {
+            if (activeBlockIndex < 0 || !input.files[0]) return;
+            segments[activeBlockIndex].customAudio = input.files[0];
+            document.getElementById('custom-audio-label').textContent = '✅ 已套用新語音';
+            showToast("自訂語音已加載", "success");
+        }
+
+        function cropImageToDataURL(box) {
+            const [ymin, xmin, ymax, xmax] = box;
+            const y = (ymin / 1000) * originalHeight;
+            const x = (xmin / 1000) * originalWidth;
+            const h = Math.max(1, ((ymax - ymin) / 1000) * originalHeight);
+            const w = Math.max(1, ((xmax - xmin) / 1000) * originalWidth);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = w; canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            
+            ctx.drawImage(originalImgEl, x, y, w, h, 0, 0, w, h);
+            return canvas.toDataURL('image/jpeg', 0.95);
+        }
+
+        async function previewCurrentScene() {
+            if (activeBlockIndex < 0) return;
+            const seg = segments[activeBlockIndex];
+            
+            bboxContainer.classList.add('hidden'); 
+            
+            if (seg.customImage) {
+                stageImg.src = seg.customImage; 
+            } else {
+                stageImg.src = cropImageToDataURL(seg.bounding_box); 
+            }
+
+            document.getElementById('wave-ui').classList.add('active');
+            let audioUrl = '';
+            
+            try {
+                if (seg.customAudio) {
+                    audioUrl = URL.createObjectURL(seg.customAudio);
+                } else {
+                    if (!seg.audioBlob) {
+                        showToast("正在生成語音...", "success");
+                        const ttsB64 = await getTTS(seg.speech);
+                        seg.audioBlob = pcmToWav(ttsB64);
+                    }
+                    audioUrl = URL.createObjectURL(seg.audioBlob);
+                }
+                
+                const player = document.getElementById('audio-player');
+                player.src = audioUrl;
+                await new Promise(r => { player.onended = r; player.play(); });
+                
+            } catch(e) {
+                showToast("預覽播放發生錯誤：" + e.message);
+            } finally {
+                document.getElementById('wave-ui').classList.remove('active');
+                stageImg.src = originalImageGlobal;
+                bboxContainer.classList.remove('hidden');
+            }
+        }
+
+        async function getTTS(text) {
+            const data = await fetchWithRetry(API_TTS, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text }] }],
+                    generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } } }
+                })
+            }, 3);
+            const part = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+            if (!part) throw new Error("語音生成失敗");
+            return part.inlineData.data;
+        }
+
+        function pcmToWav(b64) {
+            const bin = atob(b64);
+            const buf = new ArrayBuffer(44 + bin.length);
+            const view = new DataView(buf);
+            const writeStr = (off, str) => { for(let i=0; i<str.length; i++) view.setUint8(off+i, str.charCodeAt(i)); };
+            writeStr(0, 'RIFF'); view.setUint32(4, 36+bin.length, true); writeStr(8, 'WAVE'); writeStr(12, 'fmt ');
+            view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+            view.setUint32(24, 24000, true); view.setUint32(28, 48000, true); view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true); writeStr(36, 'data'); view.setUint32(40, bin.length, true);
+            for(let i=0; i<bin.length; i++) view.setUint8(44+i, bin.charCodeAt(i));
+            return new Blob([buf], { type: 'audio/wav' });
+        }
+
+        function addLog(msg) {
+            const logs = document.getElementById('console-logs');
+            const p = document.createElement('p');
+            p.textContent = `> ${msg}`;
+            logs.appendChild(p);
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        async function downloadFullVideo() {
+            if (segments.length === 0) return;
+            
+            const consoleEl = document.getElementById('export-console');
+            const progBar = document.getElementById('progress-bar');
+            const progText = document.getElementById('progress-text');
+            consoleEl.style.display = 'flex';
+            
+            addLog("準備合成畫布與音訊軌道...");
+            const canvas = document.getElementById('export-canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 1280; canvas.height = 720;
+            
+            const stream = canvas.captureStream(30);
+            
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            await audioCtx.resume(); 
+            const dest = audioCtx.createMediaStreamDestination();
+            const combinedStream = new MediaStream([...stream.getVideoTracks(), ...dest.stream.getAudioTracks()]);
+            
+            const mediaRecorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm' });
+            let chunks = [];
+            mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+            mediaRecorder.start();
+
+            const exportAudio = new Audio();
+            const sourceNode = audioCtx.createMediaElementSource(exportAudio);
+            sourceNode.connect(dest);
+            sourceNode.connect(audioCtx.destination); 
+
+            const mainImg = new Image();
+            mainImg.src = originalImageGlobal;
+            await mainImg.decode(); 
+
+            const renderAndPlay = async (blob, drawBaseFrame, speechText) => {
+                exportAudio.src = URL.createObjectURL(blob);
+                exportAudio.load();
+                
+                await new Promise(resolve => {
+                    if (exportAudio.readyState >= 3) { resolve(); } 
+                    else { exportAudio.oncanplay = resolve; }
+                });
+
+                ctx.font = "bold 44px 'Noto Sans TC', sans-serif";
+                const textWidth = ctx.measureText(speechText).width;
+
+                const drawFrameWithMarquee = () => {
+                    drawBaseFrame();
+
+                    const gradientHeight = 180;
+                    const gradientY = canvas.height - gradientHeight;
+                    const gradient = ctx.createLinearGradient(0, gradientY, 0, canvas.height);
+                    gradient.addColorStop(0, "rgba(0, 0, 0, 0)");
+                    gradient.addColorStop(0.4, "rgba(0, 0, 0, 0.6)");
+                    gradient.addColorStop(1, "rgba(0, 0, 0, 0.95)");
+
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(0, gradientY, canvas.width, gradientHeight);
+
+                    const duration = exportAudio.duration || 1; 
+                    const currentTime = exportAudio.currentTime || 0;
+                    const progress = currentTime / duration;
+                    
+                    const startX = canvas.width;
+                    const endX = -textWidth;
+                    const currentX = startX + (endX - startX) * progress;
+
+                    ctx.fillStyle = "#FFFFFF"; 
+                    ctx.textBaseline = "bottom";
+                    ctx.shadowColor = "rgba(0,0,0,1)";
+                    ctx.shadowBlur = 10;
+                    ctx.shadowOffsetX = 3;
+                    ctx.shadowOffsetY = 3;
+                    
+                    ctx.fillText(speechText, currentX, canvas.height - 40);
+                    
+                    ctx.shadowColor = "transparent";
+                    ctx.shadowBlur = 0;
+                    ctx.shadowOffsetX = 0;
+                    ctx.shadowOffsetY = 0;
+                };
+
+                drawFrameWithMarquee();
+                const renderLoop = setInterval(drawFrameWithMarquee, 33);
+                await new Promise(r => {
+                    exportAudio.onended = r;
+                    exportAudio.play().catch(r); 
+                });
+                clearInterval(renderLoop);
+            };
+
+            addLog("正在渲染第一幕：全圖總覽...");
+            progText.textContent = `開場...`;
+            
+            const introText = globalIntroSpeech;
+
+            const drawIntroFrame = () => {
+                ctx.fillStyle = "#0f1011";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                const scale = Math.min(canvas.width / originalWidth, canvas.height / originalHeight) * 0.9;
+                const dx = (canvas.width - originalWidth * scale) / 2;
+                const dy = (canvas.height - originalHeight * scale) / 2;
+                ctx.drawImage(mainImg, 0, 0, originalWidth, originalHeight, dx, dy, originalWidth * scale, originalHeight * scale);
+            };
+
+            try {
+            const introTtsB64 = await getTTS(introText);
+            await renderAndPlay(pcmToWav(introTtsB64), drawIntroFrame, introText);
+
+            for (let i = 0; i < segments.length; i++) {
+                const seg = segments[i];
+                const pct = Math.floor(((i) / segments.length) * 100);
+                progBar.style.width = `${pct}%`;
+                progText.textContent = `${pct}%`;
+                addLog(`正在渲染第 ${i+1} 個章節：${seg.title}`);
+
+                let targetImg = mainImg;
+                let sx, sy, sw, sh;
+
+                if (seg.customImage) {
+                    const cImg = new Image();
+                    cImg.src = seg.customImage;
+                    await cImg.decode();
+                    targetImg = cImg;
+                    sx = 0; sy = 0; sw = cImg.width; sh = cImg.height;
+                } else {
+                    const [ymin, xmin, ymax, xmax] = seg.bounding_box;
+                    sy = (ymin / 1000) * originalHeight;
+                    sx = (xmin / 1000) * originalWidth;
+                    sh = Math.max(1, ((ymax - ymin) / 1000) * originalHeight);
+                    sw = Math.max(1, ((xmax - xmin) / 1000) * originalWidth);
+                }
+
+                const drawFrame = () => {
+                    ctx.fillStyle = "#0f1011";
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    const scale = Math.min(canvas.width / sw, (canvas.height - 80) / sh) * 0.9; 
+                    const dx = (canvas.width - sw * scale) / 2;
+                    const dy = ((canvas.height - 80 - sh * scale) / 2); 
+                    ctx.drawImage(targetImg, sx, sy, sw, sh, dx, dy, sw * scale, sh * scale);
+                };
+
+                let audioToPlay = seg.customAudio;
+                if (!audioToPlay) {
+                    if (!seg.audioBlob) {
+                        addLog("合成語音軌道中...");
+                        const ttsB64 = await getTTS(seg.speech);
+                        seg.audioBlob = pcmToWav(ttsB64);
+                    }
+                    audioToPlay = seg.audioBlob;
+                }
+
+                await renderAndPlay(audioToPlay, drawFrame, seg.speech);
+            }
+
+            } catch (e) {
+                mediaRecorder.onstop = null; mediaRecorder.stop(); sourceNode.disconnect();
+                consoleEl.style.display = 'none';
+                showToast("影片合成失敗：" + e.message);
+                return;
+            }
+            progBar.style.width = `100%`;
+            progText.textContent = `100%`;
+            addLog("所有場景渲染完畢，封裝影片中...");
+            
+            mediaRecorder.stop();
+            mediaRecorder.onstop = () => {
+                sourceNode.disconnect(); 
+                const blob = new Blob(chunks, { type: 'video/webm' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url; a.download = `AI_Tour_${Date.now()}.webm`; a.click();
+                setTimeout(() => { consoleEl.style.display = 'none'; showToast("導覽影音已成功下載！", "success"); }, 1500);
+            };
+        }
+
+        function downloadArticle() {
+            let content = `主題：${themeInput.value}\n\n`;
+            if (globalIntroSpeech) {
+                content += `【開場 Hook】\n${globalIntroSpeech}\n\n`;
+            }
+            segments.forEach(s => { content += `【${s.title}】\n${s.speech}\n\n`; });
+            const b = new Blob([content], { type: 'text/plain' });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = 'AI_Tour_Script.txt'; a.click();
+            showToast("講稿已匯出", "success");
+        }
+
+    </script>
+</body>
+</html>
