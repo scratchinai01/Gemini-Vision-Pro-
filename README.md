@@ -79,6 +79,8 @@ npm run dev                  # http://localhost:8080
 | `GEMINI_TTS_MODEL` | `gemini-3.8-flash-lite-tts` | 語音模型 |
 | `ACCESS_CODES` | （空白＝不需要） | 通行碼，多組用逗號分隔 |
 | `SESSION_DAYS` | `30` | 輸入通行碼後保持登入的天數 |
+| `GEMINI_THINKING_LEVEL` | `low` | 文字模型思考程度：`low` 最快，`medium`／`high` 內容較深入但較慢 |
+| `UPSTREAM_TIMEOUT_MS` | `120000` | 等待 Gemini 回應的上限（毫秒） |
 | `RATE_LIMIT_PER_MIN` | `30` | 每個 IP 每分鐘可呼叫次數，避免網址被濫用 |
 
 > ⚠️ 這個儲存庫是公開的，請勿把金鑰寫進任何檔案。

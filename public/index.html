@@ -356,7 +356,7 @@
             </div>
 
             <div id="loader" class="absolute inset-0 flex items-center justify-center hidden bg-black/60 rounded-xl backdrop-blur-sm z-50">
-                <div class="w-12 h-12 border-4 border-blue-400/20 border-t-blue-400 rounded-full animate-spin"></div>
+                <div class="flex flex-col items-center gap-3"><div class="w-12 h-12 border-4 border-blue-400/20 border-t-blue-400 rounded-full animate-spin"></div><div id="loader-time" class="text-sm text-blue-200 font-mono"></div></div>
             </div>
         </label>
 
@@ -454,6 +454,18 @@
         
         let originalImageGlobal = null;
         let originalImgEl = null; // 已解碼的原圖，用於裁切
+        let aiImageData = null;   // 縮小後送給 AI 的 JPEG base64（加快解析）
+        const AI_MAX_SIDE = 1536;
+
+        function makeAiImage(img) {
+            const scale = Math.min(1, AI_MAX_SIDE / Math.max(img.width, img.height));
+            const c = document.createElement('canvas');
+            c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+            const cx = c.getContext('2d');
+            cx.fillStyle = '#fff'; cx.fillRect(0, 0, c.width, c.height);
+            cx.drawImage(img, 0, 0, c.width, c.height);
+            return c.toDataURL('image/jpeg', 0.88).split(',')[1];
+        }
         let originalWidth = 0;
         let originalHeight = 0;
         let segments = [];
@@ -471,7 +483,7 @@
         const blockActions = document.getElementById('block-actions');
         const editPanel = document.getElementById('edit-panel');
 
-        async function fetchWithRetry(url, options, maxRetries = 5) {
+        async function fetchWithRetry(url, options, maxRetries = 3) {
             const delays = [1000, 2000, 4000, 8000, 16000];
             for (let i = 0; i < maxRetries; i++) {
                 try {
@@ -480,7 +492,7 @@
                         const body = await res.json().catch(() => ({}));
                         const err = new Error(body.error || `HTTP ${res.status}`);
                         if (body.needCode) showGate('登入已過期，請重新輸入通行碼');
-                        err.retryable = res.status === 429 || res.status >= 500;
+                        err.retryable = res.status === 429 || (res.status >= 500 && res.status !== 504);
                         throw err;
                     }
                     return await res.json();
@@ -529,6 +541,10 @@
                 const img = new Image();
                 img.onload = () => { 
                     originalImgEl = img;
+                    aiImageData = makeAiImage(img);
+                    document.getElementById('block-title').textContent = "系統提示";
+                    typeText("> 圖片已讀取。正在為您構思充滿懸念的故事主題...");
+                    generateThemeSuggestions({ mimeType: 'image/jpeg', data: aiImageData });
                     originalWidth = img.width; 
                     originalHeight = img.height; 
                     
@@ -552,10 +568,6 @@
                 };
                 img.src = originalImageGlobal;
                 
-                const base64Data = e.target.result.split(',')[1];
-                document.getElementById('block-title').textContent = "系統提示";
-                await typeText("> 圖片已讀取。正在為您構思充滿懸念的故事主題...");
-                generateThemeSuggestions({ mimeType: file.type, data: base64Data });
             };
             reader.readAsDataURL(file);
         }
@@ -593,11 +605,18 @@
             
             mainBtn.disabled = true;
             document.getElementById('loader').classList.remove('hidden');
+            const t0 = Date.now();
+            const loaderTime = document.getElementById('loader-time');
+            loaderTime.textContent = 'AI 分析中…';
+            const loaderTimer = setInterval(() => {
+                const sec = Math.round((Date.now() - t0) / 1000);
+                loaderTime.textContent = `AI 分析中… 已等待 ${sec} 秒` + (sec > 30 ? '（複雜圖片約需 1 分鐘）' : '');
+            }, 1000);
             viewport.classList.add('generating');
             document.getElementById('block-title').textContent = "史詩級解析中";
             await typeText(`> 正在為「${theme}」構建 Netflix 級別的紀錄片旁白，請稍候...`);
             
-            const base64 = originalImageGlobal.split(',')[1];
+            const base64 = aiImageData;
             
             // 史詩級升級的 System Prompt
             const promptText = `你現在是一位「擁有百萬訂閱的爆款說書人」，同時兼具「Netflix 紀錄片旁白」那種充滿磁性、戲劇張力與神祕感的特質。你要為聽眾帶來一場極度沉浸的視覺饗宴。
@@ -620,7 +639,7 @@
                     role: "user",
                     parts: [
                         { text: promptText },
-                        { inlineData: { mimeType: fileInput.files[0].type, data: base64 } }
+                        { inlineData: { mimeType: 'image/jpeg', data: base64 } }
                     ]
                 }],
                 generationConfig: { 
@@ -662,6 +681,7 @@
                 showToast("解析失敗：" + e.message); 
                 mainBtn.disabled = false; 
             } finally { 
+                clearInterval(loaderTimer);
                 document.getElementById('loader').classList.add('hidden'); 
                 viewport.classList.remove('generating'); 
             }

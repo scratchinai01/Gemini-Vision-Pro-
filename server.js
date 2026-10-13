@@ -11,6 +11,9 @@ const MODELS = {
   text: process.env.GEMINI_MODEL || "gemini-3.8-flash",
   tts: process.env.GEMINI_TTS_MODEL || "gemini-3.8-flash-lite-tts",
 };
+const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS) || 120_000;
+// 文字模型的思考程度：low 最快；可設 medium / high 換取更深入的內容
+const THINKING_LEVEL = process.env.GEMINI_THINKING_LEVEL || "low";
 const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN) || 30;
 
 // 通行碼：多組請用逗號分隔，例如 ACCESS_CODES=7A-star,7B-moon。留空代表不需要通行碼。
@@ -102,16 +105,37 @@ app.post("/api/gemini/:kind", requireAuth, rateLimit, async (req, res) => {
   if (!model) return res.status(404).json({ error: "未知的 API" });
   if (!API_KEY) return res.status(500).json({ error: "伺服器尚未設定 GEMINI_API_KEY。" });
 
-  try {
-    const upstream = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-      {
+  const body = req.body || {};
+  if (req.params.kind === "text" && THINKING_LEVEL) {
+    body.generationConfig = { ...(body.generationConfig || {}) };
+    body.generationConfig.thinkingConfig ??= { thinkingLevel: THINKING_LEVEL };
+  }
+
+  const callGemini = async (payload) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), UPSTREAM_TIMEOUT_MS);
+    try {
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": API_KEY },
-        body: JSON.stringify(req.body),
-      }
-    );
-    const data = await upstream.json().catch(() => ({}));
+        body: JSON.stringify(payload),
+        signal: ctrl.signal,
+      });
+      return { upstream: r, data: await r.json().catch(() => ({})) };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  try {
+    const started = Date.now();
+    let { upstream, data } = await callGemini(body);
+    // 若模型不支援 thinkingConfig，移除後再試一次
+    if (upstream.status === 400 && /thinking/i.test(data?.error?.message || "") && body.generationConfig?.thinkingConfig) {
+      delete body.generationConfig.thinkingConfig;
+      ({ upstream, data } = await callGemini(body));
+    }
+    console.log(`[${req.params.kind}] ${upstream.status} in ${((Date.now() - started) / 1000).toFixed(1)}s`);
     if (!upstream.ok) {
       const msg = data?.error?.message || `Gemini API 錯誤 (${upstream.status})`;
       console.error(`[${req.params.kind}] ${upstream.status}: ${msg}`);
@@ -122,12 +146,21 @@ app.post("/api/gemini/:kind", requireAuth, rateLimit, async (req, res) => {
     }
     res.json(data);
   } catch (err) {
+    if (err?.name === "AbortError") {
+      console.error(`[${req.params.kind}] timeout after ${UPSTREAM_TIMEOUT_MS / 1000}s`);
+      return res.status(504).json({ error: "AI 回應逾時，請換一張較簡單的圖片或稍後再試。" });
+    }
     console.error(err);
     res.status(502).json({ error: "無法連線到 Gemini API" });
   }
 });
 
-app.use(express.static(path.join(__dirname, "public"), { maxAge: "5m" }));
+app.use(
+  express.static(path.join(__dirname, "public"), {
+    // HTML 不快取，重新部署後學生馬上拿到新版
+    setHeaders: (res, file) => res.setHeader("Cache-Control", file.endsWith(".html") ? "no-cache" : "public, max-age=300"),
+  })
+);
 
 const port = Number(process.env.PORT) || 8080;
 app.listen(port, () => console.log(`Gemini Vision Pro listening on :${port}`));
