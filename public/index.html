@@ -957,6 +957,10 @@
 
         function pcmToWav(b64) {
             const bin = atob(b64);
+            if (bin.startsWith('RIFF')) {
+                // 新版 TTS 模型已回傳完整 WAV，直接使用
+                return new Blob([Uint8Array.from(bin, c => c.charCodeAt(0))], { type: 'audio/wav' });
+            }
             const buf = new ArrayBuffer(44 + bin.length);
             const view = new DataView(buf);
             const writeStr = (off, str) => { for(let i=0; i<str.length; i++) view.setUint8(off+i, str.charCodeAt(i)); };
