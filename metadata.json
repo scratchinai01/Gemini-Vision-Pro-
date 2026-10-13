@@ -1,0 +1,6 @@
+{
+  "name": "Gemini Vision Pro v2",
+  "description": "智慧區塊標定與高畫質無縫導覽生成器",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
