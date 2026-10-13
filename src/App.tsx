@@ -1,8 +1,7 @@
-import React, { useState, useRef, useEffect } from "react";
-import { 
-  Camera, Sparkles, Volume2, Download, RefreshCw, Edit3, Trash2, Play, 
-  CheckCircle, AlertCircle, Layers, Image as ImageIcon, FileText, X, ChevronRight, 
-  Settings, Award, Cpu, ShieldCheck
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import {
+  Camera, Sparkles, Volume2, Edit3, Play, Pause, CheckCircle, AlertCircle, Layers,
+  Image as ImageIcon, FileText, X, ChevronRight, ChevronLeft, KeyRound, Eye, EyeOff, Loader2,
 } from "lucide-react";
 
 interface Segment {
@@ -12,127 +11,245 @@ interface Segment {
   takeaways: string[];
 }
 
+type ToastType = "success" | "warning" | "default";
+
 const PRESET_IMAGES = [
   {
     name: "智慧手錶型錄 (Smart Watch)",
     url: "https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=1000&q=80",
-    theme: "介紹這款智慧手錶的核心工藝、健康監測與長效續航特點"
+    theme: "介紹這款智慧手錶的核心工藝、健康監測與長效續航特點",
   },
   {
     name: "行動 App 介面導覽 (Mobile App UI)",
     url: "https://images.unsplash.com/photo-1551650975-87deedd944c3?auto=format&fit=crop&w=1000&q=80",
-    theme: "展示應用程式的主要導覽功能與數據儀表板設計"
+    theme: "展示應用程式的主要導覽功能與數據儀表板設計",
   },
   {
     name: "科技海報設計 (Tech Poster)",
     url: "https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1000&q=80",
-    theme: "解構次世代人工智慧晶片與運算架構創新"
-  }
+    theme: "解構次世代人工智慧晶片與運算架構創新",
+  },
 ];
+
+const VOICES = [
+  { id: "Kore", label: "Kore (專業知性女聲)" },
+  { id: "Puck", label: "Puck (活潑男聲)" },
+  { id: "Fenrir", label: "Fenrir (磁性沉穩男聲)" },
+  { id: "Zephyr", label: "Zephyr (溫柔舒緩女聲)" },
+  { id: "Charon", label: "Charon (沉著旁白)" },
+];
+
+const API_KEY_STORAGE = "gvp_gemini_api_key";
+const MAX_UPLOAD_SIDE = 1600;
+
+// localStorage 在無痕模式或封鎖時可能拋錯，一律包起來
+const storage = {
+  get(key: string) {
+    try { return localStorage.getItem(key) || ""; } catch { return ""; }
+  },
+  set(key: string, value: string) {
+    try { value ? localStorage.setItem(key, value) : localStorage.removeItem(key); } catch { /* ignore */ }
+  },
+};
+
+/** 上傳前先縮圖，避免大圖拖慢上傳與 API 計費 */
+function downscaleImage(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("讀取檔案失敗"));
+    reader.onload = () => {
+      const src = reader.result as string;
+      const img = new Image();
+      img.onerror = () => reject(new Error("無法解析這張圖片"));
+      img.onload = () => {
+        const scale = Math.min(1, MAX_UPLOAD_SIDE / Math.max(img.width, img.height));
+        if (scale === 1 && file.size < 2 * 1024 * 1024) return resolve(src);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return resolve(src);
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.9));
+      };
+      img.src = src;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+const boxStyle = ([ymin, xmin, ymax, xmax]: number[]) => ({
+  top: `${ymin / 10}%`,
+  left: `${xmin / 10}%`,
+  height: `${(ymax - ymin) / 10}%`,
+  width: `${(xmax - xmin) / 10}%`,
+});
 
 export default function App() {
   const [originalImage, setOriginalImage] = useState<string | null>(PRESET_IMAGES[0].url);
-  const [originalWidth, setOriginalWidth] = useState<number>(1000);
-  const [originalHeight, setOriginalHeight] = useState<number>(1000);
+  const [presetIndex, setPresetIndex] = useState<number>(0);
   const [theme, setTheme] = useState<string>(PRESET_IMAGES[0].theme);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [activeIndex, setActiveIndex] = useState<number>(-1);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [loadingText, setLoadingText] = useState<string>("AI ANALYZING...");
-  const [toasts, setToasts] = useState<{ id: number; message: string; type: 'success' | 'warning' | 'default' }[]>([]);
+  const [toasts, setToasts] = useState<{ id: number; message: string; type: ToastType }[]>([]);
 
-  // Redraw state
+  // API 金鑰
+  const [apiKey, setApiKey] = useState<string>(() => storage.get(API_KEY_STORAGE));
+  const [hasServerKey, setHasServerKey] = useState<boolean>(false);
+  const [isKeyModalOpen, setIsKeyModalOpen] = useState<boolean>(false);
+  const [keyDraft, setKeyDraft] = useState<string>("");
+  const [showKey, setShowKey] = useState<boolean>(false);
+
+  // 重新框選
   const [isRedrawing, setIsRedrawing] = useState<boolean>(false);
-  const [drawStart, setDrawStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const drawStartRef = useRef<{ x: number; y: number } | null>(null);
   const [tempBox, setTempBox] = useState<{ ymin: number; xmin: number; ymax: number; xmax: number } | null>(null);
 
-  // Walkthrough Modal state
+  // 導覽播放
   const [isWalkthroughOpen, setIsWalkthroughOpen] = useState<boolean>(false);
   const [walkthroughStep, setWalkthroughStep] = useState<number>(0);
-  const [isPlayingWalkthrough, setIsPlayingWalkthrough] = useState<boolean>(false);
+  const [isAutoPlay, setIsAutoPlay] = useState<boolean>(true);
   const [selectedVoice, setSelectedVoice] = useState<string>("Kore");
 
-  // Audio player state
-  const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
+  // 語音
+  const [isTtsLoading, setIsTtsLoading] = useState<boolean>(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const ttsCacheRef = useRef<Map<string, string>>(new Map());
 
-  // Typewriter effect state
+  // 打字機效果
   const [displayedSpeech, setDisplayedSpeech] = useState<string>("");
+  const [isTyping, setIsTyping] = useState<boolean>(false);
+  const typeTimerRef = useRef<number | null>(null);
 
   const stageImgRef = useRef<HTMLImageElement | null>(null);
-  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const toastIdRef = useRef(0);
 
-  // Load image dimensions on change
+  const keyReady = !!apiKey || hasServerKey;
+
+  // 讀取伺服器設定，判斷是否需要使用者輸入金鑰
   useEffect(() => {
-    if (!originalImage) return;
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      setOriginalWidth(img.width || 800);
-      setOriginalHeight(img.height || 600);
-    };
-    img.src = originalImage;
-  }, [originalImage]);
+    fetch("/api/config")
+      .then((r) => r.json())
+      .then((cfg) => {
+        setHasServerKey(!!cfg.hasServerKey);
+        if (!cfg.hasServerKey && !storage.get(API_KEY_STORAGE)) setIsKeyModalOpen(true);
+      })
+      .catch(() => { /* 離線時略過 */ });
+  }, []);
 
-  // Toast helper
-  const showToast = (message: string, type: 'success' | 'warning' | 'default' = 'default') => {
-    const id = Date.now();
-    setToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, 3500);
+  useEffect(() => () => { if (typeTimerRef.current) clearInterval(typeTimerRef.current); }, []);
+
+  const showToast = useCallback((message: string, type: ToastType = "default") => {
+    const id = ++toastIdRef.current;
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3500);
+  }, []);
+
+  const apiHeaders = useCallback((): HeadersInit => {
+    const h: Record<string, string> = { "Content-Type": "application/json" };
+    if (apiKey) h["x-gemini-api-key"] = apiKey;
+    return h;
+  }, [apiKey]);
+
+  const requireKey = () => {
+    if (keyReady) return true;
+    showToast("請先設定 Gemini API 金鑰", "warning");
+    openKeyModal();
+    return false;
   };
 
-  // Handle Image Upload
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      if (event.target?.result) {
-        setOriginalImage(event.target.result as string);
-        setSegments([]);
-        setActiveIndex(-1);
-        setDisplayedSpeech("請點選畫面上的區塊，查看 AI 產生的導覽解說...");
-        showToast("圖片上傳成功！請輸入主題並開始結構解析", "success");
-      }
-    };
-    reader.readAsDataURL(file);
+  const openKeyModal = () => {
+    setKeyDraft(apiKey);
+    setShowKey(false);
+    setIsKeyModalOpen(true);
   };
 
-  // Select Preset
-  const handleSelectPreset = (preset: typeof PRESET_IMAGES[0]) => {
-    setOriginalImage(preset.url);
-    setTheme(preset.theme);
+  const saveKey = () => {
+    const k = keyDraft.trim();
+    setApiKey(k);
+    storage.set(API_KEY_STORAGE, k);
+    ttsCacheRef.current.clear();
+    setIsKeyModalOpen(false);
+    showToast(k ? "API 金鑰已儲存在這台電腦的瀏覽器中" : "已清除 API 金鑰", "success");
+  };
+
+  const stopAudio = () => {
+    const a = audioRef.current;
+    if (a) { a.pause(); a.onended = null; }
+  };
+
+  const resetResults = () => {
+    stopAudio();
     setSegments([]);
     setActiveIndex(-1);
-    setDisplayedSpeech("請點選畫面上的區塊，查看 AI 產生的導覽解說...");
+    setDisplayedSpeech("");
+    setIsRedrawing(false);
+    setTempBox(null);
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // 允許重複選同一張
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return showToast("請選擇圖片檔", "warning");
+    try {
+      const dataUrl = await downscaleImage(file);
+      setOriginalImage(dataUrl);
+      setPresetIndex(-1);
+      resetResults();
+      showToast("圖片上傳成功！請輸入主題並開始結構解析", "success");
+    } catch (err: any) {
+      showToast(err.message || "圖片讀取失敗", "warning");
+    }
+  };
+
+  const handleSelectPreset = (idx: number) => {
+    const preset = PRESET_IMAGES[idx];
+    if (!preset) return;
+    setPresetIndex(idx);
+    setOriginalImage(preset.url);
+    setTheme(preset.theme);
+    resetResults();
     showToast(`已載入預設型錄：${preset.name}`, "success");
   };
 
-  // Analyze Catalog via Server API
+  const triggerTypewriter = (text: string) => {
+    if (typeTimerRef.current) clearInterval(typeTimerRef.current);
+    setDisplayedSpeech("");
+    setIsTyping(true);
+    let i = 0;
+    typeTimerRef.current = window.setInterval(() => {
+      i++;
+      setDisplayedSpeech(text.slice(0, i));
+      if (i >= text.length) {
+        if (typeTimerRef.current) clearInterval(typeTimerRef.current);
+        typeTimerRef.current = null;
+        setIsTyping(false);
+      }
+    }, 15);
+  };
+
   const analyzeCatalog = async () => {
-    if (!originalImage || !theme.trim()) {
-      showToast("請確認已上傳圖片並輸入導覽主題", "warning");
-      return;
-    }
+    if (!originalImage || !theme.trim()) return showToast("請確認已上傳圖片並輸入導覽主題", "warning");
+    if (!requireKey()) return;
 
     setIsLoading(true);
-    setLoadingText("GEMINI VISION AI 解析中...");
-
+    stopAudio();
     try {
       const response = await fetch("/api/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: originalImage, theme }),
+        headers: apiHeaders(),
+        body: JSON.stringify({ image: originalImage, theme: theme.trim() }),
       });
-
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(data.error || "Failed to analyze image");
+        if (response.status === 401) openKeyModal();
+        throw new Error(data.error || "解析失敗");
       }
-
-      if (data.segments && data.segments.length > 0) {
+      if (data.segments?.length > 0) {
         setSegments(data.segments);
         setActiveIndex(0);
         triggerTypewriter(data.segments[0].speech);
@@ -141,140 +258,196 @@ export default function App() {
         showToast("未偵測到有效區塊，請嘗試更換主題或圖片", "warning");
       }
     } catch (err: any) {
-      console.error(err);
-      showToast(err.message || "解析失敗，請確認網路與 API Key 設定", "warning");
+      showToast(err.message || "解析失敗，請確認網路與 API 金鑰設定", "warning");
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Typewriter effect for speech
-  const triggerTypewriter = (text: string) => {
-    setDisplayedSpeech("");
-    let i = 0;
-    const timer = setInterval(() => {
-      if (i < text.length) {
-        setDisplayedSpeech(text.substring(0, i + 1));
-        i++;
-      } else {
-        clearInterval(timer);
-      }
-    }, 15);
+  const handleSelectBlock = (index: number) => {
+    if (isRedrawing) return;
+    setActiveIndex(index);
+    if (segments[index]) triggerTypewriter(segments[index].speech);
   };
 
-  // Select Block
-  const handleSelectBlock = (index: number) => {
-    setActiveIndex(index);
-    if (segments[index]) {
-      triggerTypewriter(segments[index].speech);
+  /** 取得語音（有快取就不重打 API），回傳可播放的 data URL */
+  const fetchSpeech = async (text: string): Promise<string> => {
+    const cacheKey = `${selectedVoice}::${text}`;
+    const cached = ttsCacheRef.current.get(cacheKey);
+    if (cached) return cached;
+    const res = await fetch("/api/tts", {
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify({ text, voiceName: selectedVoice }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (res.status === 401) openKeyModal();
+      throw new Error(data.error || "語音生成失敗");
+    }
+    const url = `data:${data.mimeType || "audio/wav"};base64,${data.audio}`;
+    ttsCacheRef.current.set(cacheKey, url);
+    return url;
+  };
+
+  const playSpeech = async (text: string, onEnded?: () => void) => {
+    const a = audioRef.current;
+    if (!a) return;
+    stopAudio();
+    setIsTtsLoading(true);
+    try {
+      const url = await fetchSpeech(text);
+      a.src = url;
+      a.onended = () => onEnded?.();
+      await a.play();
+    } finally {
+      setIsTtsLoading(false);
     }
   };
 
-  // Preview TTS Audio for current block
   const previewCurrentBlockAudio = async () => {
-    if (activeIndex === -1 || !segments[activeIndex]) return;
-    const textToSpeak = segments[activeIndex].speech;
-
-    showToast("正在生成語音導覽...", "default");
+    const seg = segments[activeIndex];
+    if (!seg || !requireKey()) return;
     try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: textToSpeak, voiceName: selectedVoice }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "TTS failed");
-
-      const audioDataUrl = `data:audio/wav;base64,${data.audio}`;
-      if (audioRef.current) {
-        audioRef.current.src = audioDataUrl;
-        audioRef.current.play();
-        setIsPlayingAudio(true);
-        audioRef.current.onended = () => setIsPlayingAudio(false);
-      }
-      showToast("語音導覽播放中 🔊", "success");
+      await playSpeech(seg.speech);
     } catch (err: any) {
-      console.error(err);
       showToast("語音生成失敗：" + err.message, "warning");
     }
   };
 
-  // Redraw handling
+  // ---- 重新框選（支援滑鼠與觸控） ----
+  const pointToCoord = (e: React.PointerEvent) => {
+    const rect = stageImgRef.current!.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(1000, ((e.clientX - rect.left) / rect.width) * 1000)),
+      y: Math.max(0, Math.min(1000, ((e.clientY - rect.top) / rect.height) * 1000)),
+    };
+  };
+
   const startRedraw = () => {
     if (activeIndex === -1) return;
     setIsRedrawing(true);
-    showToast("請在圖片上按住並拖曳以重新框選範圍", "warning");
+    showToast("請在圖片上按住並拖曳，重新框選範圍（按 Esc 取消）", "warning");
   };
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!isRedrawing || !stageImgRef.current) return;
-    const rect = stageImgRef.current.getBoundingClientRect();
-    const x = Math.max(0, Math.min(1000, ((e.clientX - rect.left) / rect.width) * 1000));
-    const y = Math.max(0, Math.min(1000, ((e.clientY - rect.top) / rect.height) * 1000));
-    setDrawStart({ x, y });
-    setTempBox({ ymin: y, xmin: x, ymax: y, xmax: x });
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const p = pointToCoord(e);
+    drawStartRef.current = p;
+    setTempBox({ ymin: p.y, xmin: p.x, ymax: p.y, xmax: p.x });
   };
 
-  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isRedrawing || !tempBox || !stageImgRef.current) return;
-    const rect = stageImgRef.current.getBoundingClientRect();
-    const currX = Math.max(0, Math.min(1000, ((e.clientX - rect.left) / rect.width) * 1000));
-    const currY = Math.max(0, Math.min(1000, ((e.clientY - rect.top) / rect.height) * 1000));
-
-    const ymin = Math.min(drawStart.y, currY);
-    const xmin = Math.min(drawStart.x, currX);
-    const ymax = Math.max(drawStart.y, currY);
-    const xmax = Math.max(drawStart.x, currX);
-
-    setTempBox({ ymin, xmin, ymax, xmax });
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const start = drawStartRef.current;
+    if (!isRedrawing || !start || !stageImgRef.current) return;
+    const p = pointToCoord(e);
+    setTempBox({
+      ymin: Math.min(start.y, p.y), xmin: Math.min(start.x, p.x),
+      ymax: Math.max(start.y, p.y), xmax: Math.max(start.x, p.x),
+    });
   };
 
-  const handleMouseUp = () => {
+  const handlePointerUp = () => {
     if (!isRedrawing || !tempBox) return;
     if (tempBox.xmax - tempBox.xmin > 20 && tempBox.ymax - tempBox.ymin > 20) {
-      const updated = [...segments];
-      updated[activeIndex].bounding_box = [
-        Math.round(tempBox.ymin),
-        Math.round(tempBox.xmin),
-        Math.round(tempBox.ymax),
-        Math.round(tempBox.xmax),
+      const box: Segment["bounding_box"] = [
+        Math.round(tempBox.ymin), Math.round(tempBox.xmin), Math.round(tempBox.ymax), Math.round(tempBox.xmax),
       ];
-      setSegments(updated);
+      setSegments((prev) => prev.map((s, i) => (i === activeIndex ? { ...s, bounding_box: box } : s)));
       showToast("區塊範圍已成功更新！", "success");
+    } else {
+      showToast("框選範圍太小，請再試一次", "warning");
     }
+    drawStartRef.current = null;
     setIsRedrawing(false);
     setTempBox(null);
   };
 
-  // Export script
+  // ---- 導覽播放 ----
+  const closeWalkthrough = () => {
+    stopAudio();
+    setIsWalkthroughOpen(false);
+  };
+
+  const goStep = (next: number) => {
+    stopAudio();
+    if (next >= segments.length) {
+      closeWalkthrough();
+      showToast("導覽播放完畢！", "success");
+      return;
+    }
+    setWalkthroughStep(Math.max(0, next));
+  };
+
+  // 自動播放：每一步朗讀完自動進到下一步
+  useEffect(() => {
+    if (!isWalkthroughOpen || !isAutoPlay) return;
+    const seg = segments[walkthroughStep];
+    if (!seg) return;
+    let cancelled = false;
+    playSpeech(seg.speech, () => {
+      if (!cancelled) setTimeout(() => !cancelled && goStep(walkthroughStep + 1), 600);
+    }).catch((err) => {
+      if (cancelled) return;
+      setIsAutoPlay(false);
+      showToast("自動旁白暫停：" + err.message, "warning");
+    });
+    return () => { cancelled = true; stopAudio(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isWalkthroughOpen, isAutoPlay, walkthroughStep]);
+
+  // 鍵盤快捷鍵
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (isRedrawing) { setIsRedrawing(false); setTempBox(null); drawStartRef.current = null; }
+        else if (isWalkthroughOpen) closeWalkthrough();
+        else if (isKeyModalOpen && keyReady) setIsKeyModalOpen(false);
+      }
+      if (isWalkthroughOpen) {
+        if (e.key === "ArrowRight") goStep(walkthroughStep + 1);
+        if (e.key === "ArrowLeft") goStep(walkthroughStep - 1);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
   const exportScript = () => {
     if (segments.length === 0) return;
-    const text = segments.map((s, idx) => `【區塊 ${idx + 1}: ${s.title}】\n導覽口白：${s.speech}\n重點摘要：\n${s.takeaways.map(t => ` - ${t}`).join('\n')}`).join('\n\n------------------------------------\n\n');
-    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const text = segments
+      .map((s, idx) => `【區塊 ${idx + 1}: ${s.title}】\n導覽口白：${s.speech}\n重點摘要：\n${s.takeaways.map((t) => ` - ${t}`).join("\n")}`)
+      .join("\n\n------------------------------------\n\n");
+    const blob = new Blob([`主題：${theme}\n\n${text}`], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = "gemini_vision_walkthrough_script.txt";
     a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     showToast("導覽文案腳本已成功匯出", "success");
   };
 
+  const activeSeg = activeIndex !== -1 ? segments[activeIndex] : undefined;
+
   return (
     <div className="min-h-screen bg-[#0f1214] text-[#e3e3e3] flex flex-col items-center p-4 md:p-8">
-      {/* Toast Notification Container */}
-      <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[9999] flex flex-col gap-2 pointer-events-none">
-        {toasts.map(toast => (
-          <div 
+      {/* Toast */}
+      <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[100000] flex flex-col gap-2 pointer-events-none w-[calc(100%-2rem)] max-w-md">
+        {toasts.map((toast) => (
+          <div
             key={toast.id}
-            className={`pointer-events-auto px-5 py-3 rounded-2xl text-sm font-medium shadow-2xl backdrop-blur-md border flex items-center gap-3 transition-all animate-bounce ${
-              toast.type === 'success' 
-                ? 'bg-[#1e2923]/90 border-[#81c995]/30 text-[#81c995]' 
-                : toast.type === 'warning'
-                ? 'bg-[#2a2419]/90 border-[#fbbc04]/30 text-[#fbbc04]'
-                : 'bg-[#1e1f20]/90 border-white/10 text-white'
+            role="status"
+            className={`toast-in pointer-events-auto px-5 py-3 rounded-2xl text-sm font-medium shadow-2xl backdrop-blur-md border flex items-center gap-3 ${
+              toast.type === "success"
+                ? "bg-[#1e2923]/90 border-[#81c995]/30 text-[#81c995]"
+                : toast.type === "warning"
+                ? "bg-[#2a2419]/90 border-[#fbbc04]/30 text-[#fbbc04]"
+                : "bg-[#1e1f20]/90 border-white/10 text-white"
             }`}
           >
-            {toast.type === 'success' ? <CheckCircle className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
+            {toast.type === "success" ? <CheckCircle className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
             {toast.message}
           </div>
         ))}
@@ -295,17 +468,15 @@ export default function App() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          {/* Preset dropdown */}
           <div className="flex items-center gap-2 bg-[#202225] px-3 py-2 rounded-xl border border-white/15 text-sm">
             <span className="text-gray-400 text-xs">範本：</span>
-            <select 
+            <select
+              aria-label="選擇範本"
               className="bg-transparent text-white outline-none cursor-pointer"
-              onChange={(e) => {
-                const idx = Number(e.target.value);
-                if (!isNaN(idx)) handleSelectPreset(PRESET_IMAGES[idx]);
-              }}
-              defaultValue={0}
+              value={presetIndex}
+              onChange={(e) => handleSelectPreset(Number(e.target.value))}
             >
+              {presetIndex === -1 && <option value={-1} className="bg-[#1e1f20]">自訂圖片</option>}
               {PRESET_IMAGES.map((p, i) => (
                 <option key={i} value={i} className="bg-[#1e1f20] text-white">{p.name}</option>
               ))}
@@ -317,22 +488,33 @@ export default function App() {
             上傳自訂圖片
             <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
           </label>
+
+          <button
+            onClick={openKeyModal}
+            className={`px-4 py-2.5 rounded-xl font-semibold text-sm flex items-center gap-2 border transition-all cursor-pointer ${
+              keyReady
+                ? "bg-[#1e2923] border-[#81c995]/30 text-[#81c995] hover:bg-[#24322a]"
+                : "bg-[#2a2419] border-[#fbbc04]/40 text-[#fbbc04] hover:bg-[#332c1e] animate-pulse"
+            }`}
+          >
+            <KeyRound className="w-4 h-4" />
+            API 金鑰設定
+            <span className={`w-2 h-2 rounded-full ${keyReady ? "bg-[#81c995]" : "bg-[#fbbc04]"}`} />
+          </button>
         </div>
       </header>
 
-      {/* Main Grid Layout */}
+      {/* Main */}
       <div className="w-full max-w-[1300px] grid grid-cols-1 lg:grid-cols-12 gap-6">
-        
-        {/* Left: Interactive Viewport (8 Cols) */}
-        <div className="lg:col-span-8 bg-[#16181a] rounded-3xl p-6 border border-white/5 shadow-2xl flex flex-col gap-4">
-          
-          {/* Viewport Box */}
-          <div 
-            ref={viewportRef}
-            className={`w-full h-[520px] md:h-[600px] bg-black/80 rounded-2xl relative flex items-center justify-center overflow-hidden border-2 ${isRedrawing ? 'border-amber-400 cursor-crosshair shadow-lg shadow-amber-400/20' : 'border-white/5'} transition-all`}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
+        {/* Left: Viewport */}
+        <div className="lg:col-span-8 bg-[#16181a] rounded-3xl p-4 md:p-6 border border-white/5 shadow-2xl flex flex-col gap-4">
+          <div
+            className={`w-full h-[420px] md:h-[600px] bg-black/80 rounded-2xl relative flex items-center justify-center overflow-hidden border-2 ${
+              isRedrawing ? "border-amber-400 cursor-crosshair shadow-lg shadow-amber-400/20 touch-none" : "border-white/5"
+            } transition-all`}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
           >
             {!originalImage ? (
               <div className="text-center text-gray-500 flex flex-col items-center">
@@ -340,96 +522,87 @@ export default function App() {
                 <p>請上傳或選擇一張圖片以開始 AI 分析</p>
               </div>
             ) : (
-              <div id="image-wrapper" className="relative max-w-full max-h-full flex items-center justify-center">
-                <img 
+              <div className="relative max-w-full max-h-full flex items-center justify-center">
+                <img
                   ref={stageImgRef}
-                  src={originalImage} 
-                  alt="Catalog Stage" 
-                  className="max-h-[580px] max-w-full object-contain rounded-lg select-none"
+                  src={originalImage}
+                  alt="型錄圖片"
+                  draggable={false}
+                  className="max-h-[400px] md:max-h-[580px] max-w-full object-contain rounded-lg select-none"
                 />
 
-                {/* Render Bounding Boxes */}
-                <div className="absolute inset-0 pointer-events-auto">
+                <div className="absolute inset-0">
                   {segments.map((seg, i) => {
-                    const [ymin, xmin, ymax, xmax] = seg.bounding_box;
                     const isActive = activeIndex === i;
                     return (
-                      <div
+                      <button
                         key={i}
+                        type="button"
+                        aria-label={`區塊 ${i + 1}：${seg.title}`}
                         onClick={(e) => { e.stopPropagation(); handleSelectBlock(i); }}
-                        className={`absolute border-2 rounded-md cursor-pointer transition-all duration-200 group ${
-                          isActive 
-                            ? 'border-purple-400 bg-purple-500/20 shadow-[0_0_25px_rgba(197,138,249,0.5)] z-20 scale-[1.01]' 
-                            : 'border-blue-400/80 bg-blue-500/10 hover:bg-blue-500/20 hover:border-white z-10'
+                        className={`absolute border-2 rounded-md transition-all duration-200 ${
+                          isRedrawing ? "pointer-events-none opacity-40" : "cursor-pointer"
+                        } ${
+                          isActive
+                            ? "border-purple-400 bg-purple-500/20 shadow-[0_0_25px_rgba(197,138,249,0.5)] z-20"
+                            : "border-blue-400/80 bg-blue-500/10 hover:bg-blue-500/20 hover:border-white z-10"
                         }`}
-                        style={{
-                          top: `${ymin / 10}%`,
-                          left: `${xmin / 10}%`,
-                          height: `${(ymax - ymin) / 10}%`,
-                          width: `${(xmax - xmin) / 10}%`,
-                        }}
+                        style={boxStyle(seg.bounding_box)}
                       >
-                        <div className={`absolute -top-7 left-0 px-2.5 py-0.5 rounded-t-md text-xs font-bold tracking-wider shadow-md whitespace-nowrap ${
-                          isActive ? 'bg-purple-600 text-white' : 'bg-blue-600 text-blue-100'
-                        }`}>
+                        <span
+                          className={`absolute left-0 px-2.5 py-0.5 text-xs font-bold tracking-wider shadow-md whitespace-nowrap ${
+                            seg.bounding_box[0] < 40 ? "top-0 rounded-br-md" : "-top-6 rounded-t-md"
+                          } ${isActive ? "bg-purple-600 text-white" : "bg-blue-600 text-blue-100"}`}
+                        >
                           {i + 1}. {seg.title}
-                        </div>
-                      </div>
+                        </span>
+                      </button>
                     );
                   })}
 
-                  {/* Temp redrawn box */}
                   {tempBox && (
-                    <div 
+                    <div
                       className="absolute border-2 border-dashed border-amber-400 bg-amber-400/20 pointer-events-none z-30 rounded-md"
-                      style={{
-                        top: `${tempBox.ymin / 10}%`,
-                        left: `${tempBox.xmin / 10}%`,
-                        height: `${(tempBox.ymax - tempBox.ymin) / 10}%`,
-                        width: `${(tempBox.xmax - tempBox.xmin) / 10}%`,
-                      }}
+                      style={boxStyle([tempBox.ymin, tempBox.xmin, tempBox.ymax, tempBox.xmax])}
                     />
                   )}
                 </div>
               </div>
             )}
 
-            {/* AI Scanning Loader Overlay */}
             {isLoading && (
               <div className="absolute inset-0 bg-black/70 backdrop-blur-sm z-50 flex flex-col items-center justify-center">
-                <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-                <p className="mt-4 text-blue-400 font-mono tracking-widest font-bold animate-pulse">{loadingText}</p>
+                <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                <p className="mt-4 text-blue-400 font-mono tracking-widest font-bold animate-pulse">GEMINI VISION AI 解析中...</p>
               </div>
             )}
           </div>
 
-          {/* Theme & Analyze Control Bar */}
-          <div className="flex flex-col md:flex-row items-center gap-3 mt-1">
-            <div className="relative flex-1 w-full">
-              <input 
-                type="text" 
-                value={theme}
-                onChange={(e) => setTheme(e.target.value)}
-                placeholder="輸入導覽主題（例如：核心科技、規格亮點、UI互動設計...）"
-                className="w-full bg-[#202225] border border-white/10 rounded-2xl px-4 py-3.5 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none text-sm transition-all shadow-inner"
-              />
-            </div>
-            <button 
-              onClick={analyzeCatalog}
+          <form
+            className="flex flex-col md:flex-row items-center gap-3 mt-1"
+            onSubmit={(e) => { e.preventDefault(); analyzeCatalog(); }}
+          >
+            <input
+              type="text"
+              value={theme}
+              maxLength={200}
+              onChange={(e) => setTheme(e.target.value)}
+              placeholder="輸入導覽主題（例如：核心科技、規格亮點、UI互動設計...）"
+              className="flex-1 w-full bg-[#202225] border border-white/10 rounded-2xl px-4 py-3.5 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none text-sm transition-all shadow-inner"
+            />
+            <button
+              type="submit"
               disabled={isLoading || !originalImage}
               className="w-full md:w-auto px-6 py-3.5 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-bold rounded-2xl shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition-all disabled:opacity-50 cursor-pointer"
             >
-              <Sparkles className="w-5 h-5" />
+              {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
               開始 AI 結構解析
             </button>
-          </div>
-
+          </form>
         </div>
 
-        {/* Right: Side Panel & Details (4 Cols) */}
+        {/* Right: Side Panel */}
         <div className="lg:col-span-4 flex flex-col gap-6">
-          
-          {/* Block Detail & Speech Card */}
           <div className="bg-[#16181a] rounded-3xl p-6 border border-white/5 shadow-2xl flex flex-col gap-4">
             <div className="flex justify-between items-center">
               <h3 className="text-sm font-bold text-blue-400 uppercase tracking-wider flex items-center gap-2">
@@ -443,56 +616,54 @@ export default function App() {
               )}
             </div>
 
-            {/* Speech Box */}
-            <div className="bg-black/30 rounded-2xl p-4 border-l-4 border-blue-500 min-h-[110px] text-sm text-gray-200 leading-relaxed font-sans shadow-inner relative">
-              {activeIndex !== -1 && segments[activeIndex] ? (
+            <div className="bg-black/30 rounded-2xl p-4 border-l-4 border-blue-500 min-h-[110px] text-sm text-gray-200 leading-relaxed shadow-inner">
+              {activeSeg ? (
                 <>
-                  <div className="font-bold text-white mb-1 flex items-center justify-between">
-                    <span>{segments[activeIndex].title}</span>
-                  </div>
-                  <p className="text-gray-300">{displayedSpeech}<span className="inline-block w-1.5 h-4 bg-blue-400 ml-1 animate-pulse"></span></p>
+                  <div className="font-bold text-white mb-1">{activeSeg.title}</div>
+                  <p className="text-gray-300">
+                    {displayedSpeech}
+                    {isTyping && <span className="inline-block w-1.5 h-4 bg-blue-400 ml-1 align-middle animate-pulse" />}
+                  </p>
                 </>
               ) : (
                 <span className="text-gray-500 italic">點選畫面上任一藍色區塊，即可查看 AI 產生的專業導覽口白...</span>
               )}
             </div>
 
-            {/* Key Takeaways */}
-            {activeIndex !== -1 && segments[activeIndex]?.takeaways && (
+            {activeSeg?.takeaways?.length ? (
               <div className="flex flex-col gap-2">
                 <span className="text-xs text-gray-400 font-medium">重點特色摘要：</span>
                 <ul className="space-y-1.5">
-                  {segments[activeIndex].takeaways.map((t, idx) => (
+                  {activeSeg.takeaways.map((t, idx) => (
                     <li key={idx} className="text-xs bg-[#202225] px-3 py-2 rounded-xl text-gray-300 flex items-start gap-2 border border-white/5">
                       <span className="text-purple-400 font-bold">•</span> {t}
                     </li>
                   ))}
                 </ul>
               </div>
-            )}
+            ) : null}
 
-            {/* Block Controls */}
-            {activeIndex !== -1 && (
+            {activeSeg && (
               <div className="grid grid-cols-2 gap-2 mt-2">
-                <button 
-                  onClick={startRedraw}
+                <button
+                  onClick={isRedrawing ? () => { setIsRedrawing(false); setTempBox(null); } : startRedraw}
                   className="py-2.5 px-3 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-xl font-semibold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
                 >
                   <Edit3 className="w-3.5 h-3.5" />
-                  重新繪製範圍
+                  {isRedrawing ? "取消重繪" : "重新繪製範圍"}
                 </button>
-                <button 
+                <button
                   onClick={previewCurrentBlockAudio}
-                  className="py-2.5 px-3 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-xl font-semibold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                  disabled={isTtsLoading}
+                  className="py-2.5 px-3 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-xl font-semibold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
                 >
-                  <Volume2 className="w-3.5 h-3.5" />
+                  {isTtsLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Volume2 className="w-3.5 h-3.5" />}
                   單獨試聽口白
                 </button>
               </div>
             )}
           </div>
 
-          {/* Export & Walkthrough Card */}
           <div className="bg-[#16181a] rounded-3xl p-6 border border-white/5 shadow-2xl flex flex-col gap-4">
             <h3 className="text-sm font-bold text-purple-400 uppercase tracking-wider flex items-center gap-2">
               <Sparkles className="w-4 h-4" />
@@ -501,28 +672,24 @@ export default function App() {
 
             <div className="flex items-center gap-2 bg-[#202225] p-3 rounded-xl border border-white/10 text-xs">
               <span className="text-gray-400">旁白語音角色：</span>
-              <select 
-                value={selectedVoice} 
+              <select
+                aria-label="旁白語音角色"
+                value={selectedVoice}
                 onChange={(e) => setSelectedVoice(e.target.value)}
                 className="bg-transparent text-white font-medium outline-none cursor-pointer flex-1"
               >
-                <option value="Kore" className="bg-[#1e1f20]">Kore (專業知性女聲)</option>
-                <option value="Puck" className="bg-[#1e1f20]">Puck (活潑男聲)</option>
-                <option value="Fenrir" className="bg-[#1e1f20]">Fenrir (磁性沉穩男聲)</option>
-                <option value="Zephyr" className="bg-[#1e1f20]">Zephyr (溫柔舒緩女聲)</option>
-                <option value="Charon" className="bg-[#1e1f20]">Charon (沉著旁白)</option>
+                {VOICES.map((v) => (
+                  <option key={v.id} value={v.id} className="bg-[#1e1f20]">{v.label}</option>
+                ))}
               </select>
             </div>
 
-            <button 
+            <button
               onClick={() => {
-                if (segments.length === 0) {
-                  showToast("請先執行 AI 結構解析", "warning");
-                  return;
-                }
-                setIsWalkthroughOpen(true);
+                if (segments.length === 0) return showToast("請先執行 AI 結構解析", "warning");
                 setWalkthroughStep(0);
-                setIsPlayingWalkthrough(true);
+                setIsAutoPlay(keyReady);
+                setIsWalkthroughOpen(true);
               }}
               disabled={segments.length === 0}
               className="w-full py-3.5 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold rounded-2xl shadow-lg shadow-purple-600/25 flex items-center justify-center gap-2 transition-all disabled:opacity-40 cursor-pointer text-sm"
@@ -531,7 +698,7 @@ export default function App() {
               🎬 播放互動導覽影片
             </button>
 
-            <button 
+            <button
               onClick={exportScript}
               disabled={segments.length === 0}
               className="w-full py-3 bg-[#202225] hover:bg-[#282a2d] text-gray-300 font-semibold rounded-2xl border border-white/10 flex items-center justify-center gap-2 transition-all disabled:opacity-40 cursor-pointer text-xs"
@@ -540,98 +707,84 @@ export default function App() {
               📝 匯出社群與文案腳本 (.txt)
             </button>
           </div>
-
         </div>
-
       </div>
 
-      {/* Walkthrough Cinematic Modal */}
-      {isWalkthroughOpen && (
-        <div className="fixed inset-0 bg-black/90 backdrop-blur-xl z-[99999] flex flex-col items-center justify-center p-4">
-          <div className="w-full max-w-4xl bg-[#16181a] border border-white/10 rounded-3xl p-6 shadow-2xl flex flex-col gap-6 relative">
-            <div className="flex justify-between items-center">
+      {/* Walkthrough Modal */}
+      {isWalkthroughOpen && segments[walkthroughStep] && (
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-xl z-[99999] flex flex-col items-center justify-center p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-4xl bg-[#16181a] border border-white/10 rounded-3xl p-4 md:p-6 shadow-2xl flex flex-col gap-5">
+            <div className="flex justify-between items-center gap-3">
               <div>
-                <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                <h2 className="text-lg md:text-xl font-bold text-white flex items-center gap-2">
                   <Sparkles className="w-5 h-5 text-purple-400" />
                   🎬 互動式導覽簡報播放中
                 </h2>
-                <p className="text-gray-400 text-xs">正在依照 AI 解析順序進行無縫鏡頭導覽</p>
+                <p className="text-gray-400 text-xs">← → 切換段落，Esc 關閉</p>
               </div>
-              <button 
-                onClick={() => { setIsWalkthroughOpen(false); setIsPlayingWalkthrough(false); }}
-                className="w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-all cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => (isAutoPlay ? (setIsAutoPlay(false), stopAudio()) : requireKey() && setIsAutoPlay(true))}
+                  className="h-10 px-3 rounded-full bg-white/10 hover:bg-white/20 flex items-center gap-1.5 text-white text-xs font-semibold transition-all cursor-pointer"
+                >
+                  {isTtsLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : isAutoPlay ? <Pause className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                  {isAutoPlay ? "暫停旁白" : "自動旁白"}
+                </button>
+                <button
+                  onClick={closeWalkthrough}
+                  aria-label="關閉"
+                  className="w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-all cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
-            {/* Cinematic Stage */}
-            <div className="w-full h-[400px] bg-black rounded-2xl relative flex items-center justify-center overflow-hidden border border-white/10">
-              {originalImage && segments[walkthroughStep] && (
-                <div className="relative max-w-full max-h-full flex items-center justify-center">
-                  <img src={originalImage} alt="Walkthrough" className="max-h-[380px] max-w-full object-contain" />
-                  
-                  {/* Highlight box */}
-                  {(() => {
-                    const [ymin, xmin, ymax, xmax] = segments[walkthroughStep].bounding_box;
-                    return (
-                      <div 
-                        className="absolute border-4 border-purple-400 bg-purple-500/30 rounded-lg shadow-[0_0_40px_rgba(197,138,249,0.8)] transition-all duration-500 animate-pulse"
-                        style={{
-                          top: `${ymin / 10}%`,
-                          left: `${xmin / 10}%`,
-                          height: `${(ymax - ymin) / 10}%`,
-                          width: `${(xmax - xmin) / 10}%`,
-                        }}
-                      >
-                        <div className="absolute -top-9 left-0 bg-purple-600 text-white px-3 py-1 rounded-md text-sm font-bold shadow-lg">
-                          {walkthroughStep + 1}. {segments[walkthroughStep].title}
-                        </div>
-                      </div>
-                    );
-                  })()}
+            <div className="w-full h-[300px] md:h-[400px] bg-black rounded-2xl relative flex items-center justify-center overflow-hidden border border-white/10">
+              <div className="relative max-w-full max-h-full flex items-center justify-center">
+                <img src={originalImage!} alt="導覽畫面" className="max-h-[280px] md:max-h-[380px] max-w-full object-contain" />
+                <div
+                  className="absolute border-4 border-purple-400 bg-purple-500/20 rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.55),0_0_40px_rgba(197,138,249,0.8)] transition-all duration-700 ease-out"
+                  style={boxStyle(segments[walkthroughStep].bounding_box)}
+                >
+                  <div
+                    className={`absolute left-0 bg-purple-600 text-white px-3 py-1 rounded-md text-sm font-bold shadow-lg whitespace-nowrap ${
+                      segments[walkthroughStep].bounding_box[0] < 60 ? "top-1 left-1" : "-top-9"
+                    }`}
+                  >
+                    {walkthroughStep + 1}. {segments[walkthroughStep].title}
+                  </div>
                 </div>
-              )}
-            </div>
-
-            {/* Subtitle / Script Box */}
-            <div className="bg-[#202225] rounded-2xl p-4 border border-white/10 flex flex-col gap-2">
-              <div className="text-xs text-purple-400 font-mono font-bold">
-                段落 {walkthroughStep + 1} / {segments.length}
               </div>
-              <p className="text-white text-base leading-relaxed">
-                {segments[walkthroughStep]?.speech}
-              </p>
             </div>
 
-            {/* Controls */}
+            <div className="bg-[#202225] rounded-2xl p-4 border border-white/10 flex flex-col gap-2">
+              <div className="text-xs text-purple-400 font-mono font-bold">段落 {walkthroughStep + 1} / {segments.length}</div>
+              <p className="text-white text-base leading-relaxed">{segments[walkthroughStep].speech}</p>
+            </div>
+
             <div className="flex justify-between items-center">
-              <button 
-                onClick={() => setWalkthroughStep(prev => Math.max(0, prev - 1))}
+              <button
+                onClick={() => goStep(walkthroughStep - 1)}
                 disabled={walkthroughStep === 0}
-                className="px-5 py-2.5 bg-white/10 hover:bg-white/20 text-white rounded-xl font-semibold text-sm disabled:opacity-30 cursor-pointer"
+                className="px-4 md:px-5 py-2.5 bg-white/10 hover:bg-white/20 text-white rounded-xl font-semibold text-sm disabled:opacity-30 cursor-pointer flex items-center gap-1"
               >
+                <ChevronLeft className="w-4 h-4" />
                 上一步
               </button>
               <div className="flex gap-2">
                 {segments.map((_, idx) => (
-                  <button 
+                  <button
                     key={idx}
-                    onClick={() => setWalkthroughStep(idx)}
-                    className={`w-3 h-3 rounded-full transition-all ${walkthroughStep === idx ? 'bg-purple-500 w-8' : 'bg-white/30'}`}
+                    aria-label={`跳到段落 ${idx + 1}`}
+                    onClick={() => goStep(idx)}
+                    className={`h-3 rounded-full transition-all cursor-pointer ${walkthroughStep === idx ? "bg-purple-500 w-8" : "bg-white/30 w-3"}`}
                   />
                 ))}
               </div>
-              <button 
-                onClick={() => {
-                  if (walkthroughStep < segments.length - 1) {
-                    setWalkthroughStep(prev => prev + 1);
-                  } else {
-                    setIsWalkthroughOpen(false);
-                    showToast("導覽播放完畢！", "success");
-                  }
-                }}
-                className="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-bold text-sm shadow-lg shadow-purple-600/30 cursor-pointer flex items-center gap-1.5"
+              <button
+                onClick={() => goStep(walkthroughStep + 1)}
+                className="px-4 md:px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-bold text-sm shadow-lg shadow-purple-600/30 cursor-pointer flex items-center gap-1.5"
               >
                 {walkthroughStep === segments.length - 1 ? "完成導覽" : "下一步"}
                 <ChevronRight className="w-4 h-4" />
@@ -641,7 +794,81 @@ export default function App() {
         </div>
       )}
 
-      {/* Hidden Audio Element */}
+      {/* API Key Modal */}
+      {isKeyModalOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[99999] flex items-center justify-center p-4" role="dialog" aria-modal="true">
+          <form
+            onSubmit={(e) => { e.preventDefault(); saveKey(); }}
+            className="w-full max-w-md bg-[#16181a] border border-white/10 rounded-3xl p-6 shadow-2xl flex flex-col gap-4"
+          >
+            <div className="flex justify-between items-start">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <KeyRound className="w-5 h-5 text-blue-400" />
+                API 金鑰設定
+              </h2>
+              {keyReady && (
+                <button type="button" onClick={() => setIsKeyModalOpen(false)} aria-label="關閉" className="text-gray-400 hover:text-white cursor-pointer">
+                  <X className="w-5 h-5" />
+                </button>
+              )}
+            </div>
+
+            <p className="text-sm text-gray-400 leading-relaxed">
+              請貼上你的 Gemini API 金鑰。金鑰只會儲存在<strong className="text-gray-200">這台電腦的瀏覽器</strong>，不會上傳到 GitHub。
+              {hasServerKey && <span className="block mt-1 text-[#81c995]">伺服器已設定預設金鑰，此欄可留空。</span>}
+            </p>
+
+            <div className="relative">
+              <input
+                type={showKey ? "text" : "password"}
+                value={keyDraft}
+                onChange={(e) => setKeyDraft(e.target.value)}
+                placeholder="AIza..."
+                autoComplete="off"
+                spellCheck={false}
+                autoFocus
+                className="w-full bg-[#202225] border border-white/10 rounded-2xl pl-4 pr-12 py-3.5 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none text-sm font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => setShowKey((v) => !v)}
+                aria-label={showKey ? "隱藏金鑰" : "顯示金鑰"}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white cursor-pointer"
+              >
+                {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+
+            <a
+              href="https://aistudio.google.com/apikey"
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs text-blue-400 hover:underline"
+            >
+              還沒有金鑰？到 Google AI Studio 免費取得 →
+            </a>
+
+            <div className="flex gap-2 justify-end">
+              {apiKey && (
+                <button
+                  type="button"
+                  onClick={() => setKeyDraft("")}
+                  className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-white/5 hover:bg-white/10 text-gray-300 cursor-pointer"
+                >
+                  清除
+                </button>
+              )}
+              <button
+                type="submit"
+                className="px-5 py-2.5 rounded-xl text-sm font-bold bg-blue-600 hover:bg-blue-500 text-white cursor-pointer"
+              >
+                儲存
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       <audio ref={audioRef} className="hidden" />
     </div>
   );
